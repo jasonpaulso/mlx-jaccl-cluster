@@ -40,7 +40,9 @@ fi
 echo "Stopping cluster server on: $HOSTS"
 for h in $HOSTS; do
   echo "### stopping on $h"
-  ssh "$h" 'pkill -f openai_cluster_server.py || true' 2>/dev/null || true
+  # [.] keeps pkill from matching this ssh's own command line when a host
+  # resolves to the local machine.
+  ssh "$h" 'pkill -f "openai_cluster_server[.]py" || true' 2>/dev/null || true
 done
 
 echo "Done."

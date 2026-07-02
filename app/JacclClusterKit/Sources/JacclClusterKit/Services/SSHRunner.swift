@@ -54,10 +54,13 @@ public struct SSHRunner: Sendable {
     }
 
     /// Same pkill the shell scripts use; pkill exits 1 when nothing matched,
-    /// which counts as success here.
+    /// which counts as success here. The `[.]` bracket keeps the pattern from
+    /// matching any command line that merely *contains* it — without it, a
+    /// pkill running on rank 0 (= this machine) SIGTERMs our own ssh clients,
+    /// whose argv includes the pattern.
     public func pkillServer(host: String) async -> Result<Void, SSHError> {
         do {
-            let result = try await runExplained(host: host, command: "pkill -f openai_cluster_server.py || true", timeout: 15)
+            let result = try await runExplained(host: host, command: "pkill -f 'openai_cluster_server[.]py' || true", timeout: 15)
             if result.timedOut {
                 return .failure(.timeout(host: host))
             }

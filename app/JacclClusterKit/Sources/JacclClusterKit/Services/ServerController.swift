@@ -141,6 +141,31 @@ public final class ServerController {
         // (If the ssh probe fails we proceed — the preflight must not add a
         // new failure mode of its own.)
 
+        // RDMA matrix preflight: a device name that doesn't exist on its node
+        // surfaces from JACCL only as the cryptic "Couldn't allocate
+        // protection domain". Cross-check every row against live ibv_devices.
+        for entry in document.hosts {
+            let claimed = entry.rdma.compactMap { $0 }.filter { !$0.isEmpty }
+            guard !claimed.isEmpty else { continue }
+            guard let probe = try? await ssh.run(
+                host: entry.ssh,
+                command: #"ibv_devices 2>/dev/null | grep -oE 'rdma_en[0-9]+' || true"#,
+                timeout: 12
+            ), probe.exitCode == 0 else { continue }
+            let actual = Set(probe.stdout.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) })
+            guard !actual.isEmpty else { continue }
+            let missing = claimed.filter { !actual.contains($0) }
+            if !missing.isEmpty {
+                lastError = """
+                \(entry.ssh) has no RDMA device named \(missing.joined(separator: ", ")). \
+                It has: \(actual.sorted().joined(separator: ", ")). Fix that row in the \
+                Cluster tab's matrix (Verify suggests devices with an active link) — \
+                JACCL fails with 'Couldn't allocate protection domain' otherwise.
+                """
+                return
+            }
+        }
+
         let check = await settings.resolveAndTestCondaPrefix()
         guard check.ok else {
             lastError = check.detail

@@ -17,6 +17,18 @@ final class LocalNetworkTests: XCTestCase {
             "jasons-mac-studio.local", localName: "Jasons-MacBook-Pro.local"))
     }
 
+    func testDeviceStatusParsing() {
+        let output = """
+        rdma_en1 inactive
+        rdma_en2 active
+        rdma_en7 unknown
+        garbage line
+        """
+        let parsed = VerifyService.parseDeviceStatus(output)
+        XCTAssertEqual(parsed.devices, ["rdma_en1", "rdma_en2", "rdma_en7"])
+        XCTAssertEqual(parsed.active, ["rdma_en2"])
+    }
+
     func testIPv4InterfacesExcludeLoopbackAndParse() {
         let interfaces = LocalNetwork.ipv4Interfaces()
         for interface in interfaces {

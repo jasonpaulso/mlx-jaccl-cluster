@@ -7,6 +7,9 @@ public struct NodeCheckResult: Identifiable, Sendable, Equatable {
     public var sshOK: Bool
     public var remoteHostname: String?
     public var rdmaDevices: [String]
+    /// Devices whose Thunderbolt interface reports an active link — i.e. a
+    /// cable is actually plugged in there. These are the right matrix choices.
+    public var activeRdmaDevices: [String]
     /// Whether the python env exists on the node at rank 0's prefix path
     /// (nil = not checked, e.g. no prefix resolved locally).
     public var envOK: Bool?
@@ -20,13 +23,15 @@ public struct NodeCheckResult: Identifiable, Sendable, Equatable {
     public var id: String { host }
 
     public init(host: String, sshOK: Bool = false, remoteHostname: String? = nil,
-                rdmaDevices: [String] = [], envOK: Bool? = nil,
+                rdmaDevices: [String] = [], activeRdmaDevices: [String] = [],
+                envOK: Bool? = nil,
                 ipv4Addresses: [String] = [],
                 failureHint: String? = nil, checkedAt: Date = Date()) {
         self.host = host
         self.sshOK = sshOK
         self.remoteHostname = remoteHostname
         self.rdmaDevices = rdmaDevices
+        self.activeRdmaDevices = activeRdmaDevices
         self.envOK = envOK
         self.ipv4Addresses = ipv4Addresses
         self.failureHint = failureHint
@@ -84,16 +89,17 @@ public struct VerifyService: Sendable {
             result.sshOK = true
             result.remoteHostname = hostnameRun.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
 
+            // One pass: each rdma_enN device plus the link status of its enN
+            // Thunderbolt interface (active = a cable is plugged in there).
             let devicesRun = try await ssh.run(
                 host: host,
-                command: #"ibv_devices 2>/dev/null | grep -oE "rdma_en[0-9]+" || true"#,
+                command: #"for d in $(ibv_devices 2>/dev/null | grep -oE 'rdma_en[0-9]+'); do i="${d#rdma_}"; s=$(ifconfig "$i" 2>/dev/null | awk '/status:/{print $2}'); echo "$d ${s:-unknown}"; done"#,
                 timeout: 12
             )
             if devicesRun.exitCode == 0 {
-                result.rdmaDevices = devicesRun.stdout
-                    .split(separator: "\n")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty }
+                let parsed = Self.parseDeviceStatus(devicesRun.stdout)
+                result.rdmaDevices = parsed.devices
+                result.activeRdmaDevices = parsed.active
             }
 
             let ipsRun = try await ssh.run(
@@ -120,6 +126,21 @@ public struct VerifyService: Sendable {
             result.failureHint = error.localizedDescription
         }
         return result
+    }
+
+    /// Parses "rdma_enN <status>" lines from the device+link probe.
+    static func parseDeviceStatus(_ output: String) -> (devices: [String], active: [String]) {
+        var devices: [String] = []
+        var active: [String] = []
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: " ")
+            guard let device = parts.first, device.hasPrefix("rdma_en") else { continue }
+            devices.append(String(device))
+            if parts.count > 1, parts[1] == "active" {
+                active.append(String(device))
+            }
+        }
+        return (devices, active)
     }
 
     /// Cross-checks a hostfile row against live verify results.

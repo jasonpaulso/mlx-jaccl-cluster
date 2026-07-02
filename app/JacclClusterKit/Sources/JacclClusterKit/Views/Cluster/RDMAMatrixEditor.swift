@@ -83,9 +83,9 @@ private struct MatrixCellField: View {
 
             if !suggestions.isEmpty {
                 Menu {
-                    ForEach(suggestions, id: \.self) { device in
-                        Button(device) {
-                            deviceBinding.wrappedValue = device
+                    ForEach(suggestions, id: \.device) { suggestion in
+                        Button(suggestion.linkActive ? "\(suggestion.device) — link active" : suggestion.device) {
+                            deviceBinding.wrappedValue = suggestion.device
                         }
                     }
                 } label: {
@@ -149,11 +149,19 @@ private struct MatrixCellField: View {
         return text
     }
 
-    /// Devices this row's node actually reported, best suggestions first.
-    private var suggestions: [String] {
+    /// Devices this row's node actually reported; ports with an active
+    /// Thunderbolt link (a cable plugged in) come first.
+    private var suggestions: [(device: String, linkActive: Bool)] {
         guard store.document.hosts.indices.contains(row) else { return [] }
         let host = store.document.hosts[row].ssh
-        return store.verifyResults[host]?.rdmaDevices ?? []
+        guard let result = store.verifyResults[host] else { return [] }
+        let active = Set(result.activeRdmaDevices)
+        return result.rdmaDevices
+            .map { (device: $0, linkActive: active.contains($0)) }
+            .sorted { a, b in
+                if a.linkActive != b.linkActive { return a.linkActive }
+                return a.device < b.device
+            }
     }
 
     private var deviceBinding: Binding<String> {
