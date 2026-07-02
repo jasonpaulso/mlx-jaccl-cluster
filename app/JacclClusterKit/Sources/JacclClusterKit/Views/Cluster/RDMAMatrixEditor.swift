@@ -144,7 +144,7 @@ private struct MatrixCellField: View {
         switch store.cellStatus(row: row, column: column) {
         case .confirmed: text += " — confirmed by ibv_devices"
         case .missing: text += " — NOT reported by ibv_devices on \(from)"
-        case .noIPv6: text += " — exists, but its port has no IPv6 link-local (remove it from the Thunderbolt Bridge in System Settings → Network); JACCL fails with RTR errno 96 otherwise"
+        case .noIPv6: text += " — exists, but its port has no IPv6 link-local. In System Settings → Network: ⋯ → Manage Virtual Interfaces → delete the Thunderbolt Bridge, then ⋯ → Add Service for this port. JACCL fails with RTR errno 96 otherwise"
         case .unverified: text += " — run Verify to cross-check"
         }
         return text

@@ -257,10 +257,15 @@ ifconfig bridge0 | grep member         # is your rdma port (e.g. en2) in here?
 ibv_devinfo -v -d rdma_en2 | grep "GID\["
 ```
 
-Fix: System Settings → Network → Thunderbolt Bridge → ⋯ → **Manage Virtual
-Interfaces** → remove the port from the bridge (or delete the bridge), so the
-port gets its own `fe80::` address. Then re-check the GID table — an
-`fe80::…` GID entry should appear.
+Fix, in System Settings → Network (two steps — deleting the Thunderbolt
+Bridge *service* from the list is NOT enough):
+
+1. ⋯ menu under the service list → **Manage Virtual Interfaces** → delete
+   the **Thunderbolt Bridge** (this is what actually dissolves `bridge0`).
+2. ⋯ → **Add Service** → pick the Thunderbolt port (e.g. "Thunderbolt 3"),
+   so the port gets its own `fe80::` at every boot.
+
+Then re-check the GID table — an `fe80::…` GID entry should appear.
 
 ### `[jaccl] Couldn't allocate protection domain`
 

@@ -171,10 +171,12 @@ public final class ServerController {
                 lastError = """
                 \(bridged.joined(separator: ", ")) on \(entry.ssh) has no IPv6 link-local, \
                 so its RDMA GID table is empty and JACCL fails with 'Changing queue pair \
-                to RTR failed with errno 96'. Usual cause: the port is a Thunderbolt Bridge \
-                member. Fix on that Mac: System Settings → Network → Thunderbolt Bridge → ⋯ \
-                → Manage Virtual Interfaces → remove the port (or delete the bridge), then \
-                re-run Verify.
+                to RTR failed with errno 96'. Usual cause: the port belongs to the \
+                Thunderbolt Bridge. Fix on that Mac (System Settings → Network): open the \
+                ⋯ menu under the service list → Manage Virtual Interfaces → delete the \
+                Thunderbolt Bridge (deleting just the service is NOT enough), then ⋯ → \
+                Add Service for that Thunderbolt port so it gets its own address. \
+                Re-run Verify afterwards.
                 """
                 return
             }
