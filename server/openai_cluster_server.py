@@ -133,7 +133,7 @@ def scan_local_models() -> dict[str, str]:
         for d in sorted(root.iterdir()):
             if d.is_dir() and _model_complete(d):
                 found[d.name] = str(d)
-    if MODEL_ID not in found and Path(MODEL_DIR).is_dir():
+    if MODEL_ID and MODEL_ID not in found and Path(MODEL_DIR).is_dir():
         found[MODEL_ID] = MODEL_DIR
     return found
 
@@ -157,8 +157,11 @@ def _shard_compatible(model_dir: str) -> bool:
 # -------------------------
 # Configuration (env vars)
 # -------------------------
-MODEL_DIR = os.environ["MODEL_DIR"]  # REQUIRED (initial model)
-MODEL_ID = os.environ.get("MODEL_ID", os.path.basename(MODEL_DIR.rstrip("/")))
+# Initial model. Optional: without it the server starts empty and the first
+# request (or POST /v1/models/load) picks the model.
+MODEL_DIR = os.environ.get("MODEL_DIR") or ""
+MODEL_ID = os.environ.get("MODEL_ID") or (
+    os.path.basename(MODEL_DIR.rstrip("/")) if MODEL_DIR else None)
 
 # Library of switchable models: immediate subdirectories of MODELS_DIR that
 # are complete on EVERY rank and whose architecture mlx-lm can shard.
@@ -363,19 +366,21 @@ def rank0_collect(expected_world_size: int, timeout_s: float) -> dict[int, dict]
 # -------------------------
 # Lockstep model loading
 # -------------------------
-def _load_model_local(model_dir: str, model_id: str) -> None:
+def _load_model_local(model_dir: Optional[str], model_id: Optional[str]) -> None:
     """
-    Drop the current model and load another. Every rank must run this at the
-    same time — sharded_load ends in a collective, so a rank that skips it
-    (or fails before reaching it) strands the others.
+    Drop the current model and load another (or just unload, when model_dir
+    is None). Every rank must run this at the same time — sharded_load ends
+    in a collective, so a rank that skips it (or fails before reaching it)
+    strands the others. Unloading alone runs no collectives.
     """
     global _model, _tok, MODEL_DIR, MODEL_ID
     _model = None
     _tok = None
     gc.collect()
     mx.clear_cache()
-    _model, _tok = sharded_load_with_fallback(model_dir)
-    MODEL_DIR = model_dir
+    if model_dir:
+        _model, _tok = sharded_load_with_fallback(model_dir)
+    MODEL_DIR = model_dir or ""
     MODEL_ID = model_id
 
 # -------------------------
@@ -445,7 +450,8 @@ def _refresh_available_blocking() -> dict[str, str]:
     available = {
         mid: local[mid] for mid in sorted(common) if _shard_compatible(local[mid])
     }
-    available.setdefault(MODEL_ID, MODEL_DIR)  # what's loaded is servable by definition
+    if MODEL_ID:
+        available.setdefault(MODEL_ID, MODEL_DIR)  # what's loaded is servable by definition
     _available_models = available
     _available_at = time.time()
     return available
@@ -473,7 +479,7 @@ def _switch_model_blocking(model_id: str) -> None:
     old_dir, old_id = MODEL_DIR, MODEL_ID
     new_dir = available[model_id]
     _loading = model_id
-    print(f"[rank0] switching model {old_id} -> {model_id}", flush=True)
+    print(f"[rank0] switching model {old_id or '(none)'} -> {model_id}", flush=True)
     try:
         rank0_broadcast_task_raw({"type": "load", "model_dir": new_dir, "model_id": model_id})
         local_error: Optional[str] = None
@@ -495,12 +501,13 @@ def _switch_model_blocking(model_id: str) -> None:
                 f"{missing} worker(s) never finished loading '{model_id}' "
                 f"(errors: {errors or 'none'}); ranks may disagree — restart the server.")
         if errors:
-            # Everyone replied cleanly, so a lockstep rollback is safe.
-            print(f"[rank0] load failed ({'; '.join(errors)}); rolling back to {old_id}", flush=True)
-            rank0_broadcast_task_raw({"type": "load", "model_dir": old_dir, "model_id": old_id})
+            # Everyone replied cleanly, so a lockstep rollback is safe (when
+            # nothing was loaded before, "rollback" is a lockstep unload).
+            print(f"[rank0] load failed ({'; '.join(errors)}); rolling back to {old_id or '(none)'}", flush=True)
+            rank0_broadcast_task_raw({"type": "load", "model_dir": old_dir or None, "model_id": old_id})
             rollback_error: Optional[str] = None
             try:
-                _load_model_local(old_dir, old_id)
+                _load_model_local(old_dir or None, old_id)
             except Exception as e:
                 rollback_error = f"rank 0: {type(e).__name__}: {e}"
             rb = rank0_collect(_world.size(), LOAD_TIMEOUT)
@@ -536,6 +543,11 @@ def _stream_request_blocking(loop: asyncio.AbstractEventLoop, kind: str, prompt:
     """
     def put(chunk) -> None:
         loop.call_soon_threadsafe(chunk_queue.put_nowait, chunk)
+
+    # Chat prompts are templated here — after any model switch — so the
+    # template always belongs to the model that will generate.
+    if kind == "chat":
+        prompt = _build_chat_prompt(prompt)
 
     rank0_broadcast_task({"prompt": prompt, "max_tokens": max_t})
 
@@ -622,6 +634,9 @@ def _request_blocking(kind: str, prompt: str, max_t: int) -> dict:
     Runs on _gen_executor. Blocking: broadcasts the task, generates the full
     completion, waits for workers, returns the OpenAI-shaped response.
     """
+    if kind == "chat":  # template with the (possibly just-switched) model's tokenizer
+        prompt = _build_chat_prompt(prompt)
+
     rank0_broadcast_task({"prompt": prompt, "max_tokens": max_t})
 
     t0 = time.time()
@@ -822,14 +837,20 @@ async def _stream_generator(chunk_queue: asyncio.Queue) -> AsyncGenerator[str, N
 
 def _resolve_requested_model(requested: Optional[str]) -> Optional[str]:
     """None when the request targets the loaded model; otherwise the model id
-    to switch to (validated against the registry) or an HTTP 400."""
+    to switch to (validated against the registry) or an HTTP 400/409."""
     wanted = (requested or "").strip()
     if not wanted or wanted == MODEL_ID:
+        if _model is None:
+            raise HTTPException(
+                status_code=409,
+                detail="No model loaded. Name one in the request's \"model\" field or "
+                       f"POST /v1/models/load. Available: {sorted(_available_models)}")
         return None
     if wanted not in _available_models:
+        available = sorted(_available_models) or ([MODEL_ID] if MODEL_ID else [])
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown model '{wanted}'. Available: {sorted(_available_models or {MODEL_ID})}")
+            detail=f"Unknown model '{wanted}'. Available: {available}")
     return wanted
 
 @app.post("/v1/chat/completions")
@@ -841,7 +862,9 @@ async def chat_completions(req: ChatCompletionsReq):
     if _world.rank() != 0:
         raise HTTPException(status_code=500, detail="Rank != 0 received HTTP request")
 
-    prompt = _build_chat_prompt(req.messages)
+    # Deliberately NOT templated here: the chat template must come from the
+    # tokenizer that generates, which a model switch may be about to replace.
+    prompt = req.messages
     max_t = req.max_tokens or DEFAULT_MAX_TOKENS
 
     if req.stream:
@@ -940,7 +963,10 @@ async def completions(req: CompletionsReq):
 def main() -> None:
     global _model, _tok, _world
     _world = mx.distributed.init()
-    _model, _tok = sharded_load_with_fallback(MODEL_DIR)
+    if MODEL_DIR:
+        _model, _tok = sharded_load_with_fallback(MODEL_DIR)
+    else:
+        print(f"[rank {_world.rank()}] starting without a model — load one via the API", flush=True)
 
     if _world.rank() == 0:
         th = threading.Thread(target=rank0_accept_workers, args=(_world.size(),), daemon=True)
