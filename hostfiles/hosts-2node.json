@@ -6,7 +6,7 @@
     ],
     "rdma" : [
       null,
-      "rdma_en5"
+      "rdma_en2"
     ]
   },
   {
@@ -15,7 +15,7 @@
 
     ],
     "rdma" : [
-      "rdma_en5",
+      "rdma_en7",
       null
     ]
   }
