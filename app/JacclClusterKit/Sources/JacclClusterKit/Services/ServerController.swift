@@ -194,6 +194,15 @@ public final class ServerController {
             return
         }
 
+        // Sharding preflight: the server loads via mlx-lm's sharded_load, which
+        // requires the architecture to implement shard(). Otherwise every rank
+        // dies late with "The model does not support any sharding" (seen live
+        // with gemma). The env's own mlx_lm/models/<type>.py is the truth.
+        if let issue = Self.shardingSupportIssue(modelDir: modelDir, envPrefix: check.prefix) {
+            lastError = issue
+            return
+        }
+
         // --- Begin ---
         handle(.startRequested)
         expectedExit = false
@@ -312,6 +321,44 @@ public final class ServerController {
         if case .crashed = state {
             handle(.resetRequested)
         }
+    }
+
+    /// Returns a user-facing error when the model's architecture can't be
+    /// sharded by the env's mlx-lm; nil when supported or undeterminable
+    /// (the preflight must not invent new failure modes).
+    static func shardingSupportIssue(modelDir: String, envPrefix: String, fileManager fm: FileManager = .default) -> String? {
+        guard let configData = fm.contents(atPath: "\(modelDir)/config.json"),
+              let json = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
+              let modelType = json["model_type"] as? String
+        else { return nil }
+
+        guard let libContents = try? fm.contentsOfDirectory(atPath: "\(envPrefix)/lib"),
+              let pythonDir = libContents.first(where: { $0.hasPrefix("python3") })
+        else { return nil }
+        let modelsDir = "\(envPrefix)/lib/\(pythonDir)/site-packages/mlx_lm/models"
+        guard fm.fileExists(atPath: modelsDir) else { return nil }
+
+        let modelFile = "\(modelsDir)/\(modelType).py"
+        guard let source = try? String(contentsOfFile: modelFile, encoding: .utf8) else {
+            // Unknown to this mlx-lm — the load would fail anyway.
+            return "Model type '\(modelType)' isn't known to the mlx-lm in \(envPrefix). Update mlx-lm (and re-provision worker nodes) or pick a different model."
+        }
+        guard source.contains("def shard") else {
+            let supported = ((try? fm.contentsOfDirectory(atPath: modelsDir)) ?? [])
+                .filter { $0.hasSuffix(".py") }
+                .compactMap { file -> String? in
+                    let path = "\(modelsDir)/\(file)"
+                    guard let s = try? String(contentsOfFile: path, encoding: .utf8), s.contains("def shard") else { return nil }
+                    return String(file.dropLast(3))
+                }
+                .sorted()
+            return """
+            '\(URL(fileURLWithPath: modelDir).lastPathComponent)' is model type '\(modelType)', \
+            which this mlx-lm cannot shard for distributed serving. Architectures it can shard: \
+            \(supported.joined(separator: ", ")).
+            """
+        }
+        return nil
     }
 
     private func pkillAll(hosts: [String]) async {
