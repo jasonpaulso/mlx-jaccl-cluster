@@ -203,6 +203,9 @@ struct HostfileFormView: View {
 struct NodeRow: View {
     @Bindable var model: AppModel
     let index: Int
+    @State private var bridgeFixPlan: ThunderboltBridgeFix.Plan?
+    @State private var isFixingBridge = false
+    @State private var bridgeFixMessage: String?
 
     private var store: HostfileStore { model.hostfiles }
 
@@ -245,6 +248,7 @@ struct NodeRow: View {
                     verifyChip
                     envChip
                     setupButton
+                    bridgeFixChip
 
                     Spacer()
 
@@ -258,6 +262,20 @@ struct NodeRow: View {
                     .help("Remove node (also removes its matrix column)")
                 }
                 provisioningStatus
+            }
+            .task(id: store.verifyResults[host]?.checkedAt) {
+                await refreshBridgeFixPlan()
+            }
+            .alert(
+                "Thunderbolt network config",
+                isPresented: Binding(
+                    get: { bridgeFixMessage != nil },
+                    set: { if !$0 { bridgeFixMessage = nil } }
+                )
+            ) {
+                Button("OK") { bridgeFixMessage = nil }
+            } message: {
+                Text(bridgeFixMessage ?? "")
             }
         }
     }
@@ -345,6 +363,82 @@ struct NodeRow: View {
                 .padding(.leading, 52)
         default:
             EmptyView()
+        }
+    }
+
+    /// Config-level Thunderbolt check for the row that is *this* machine: a
+    /// bridge virtual interface holding TB ports, or a TB port without its
+    /// own network service, breaks RDMA at the next boot (empty GID table →
+    /// "RTR failed errno 96") even if the runtime state looks healthy now.
+    /// Live verify can't see this — a healthy-looking en2 can still be one
+    /// reboot away from re-capture — so this reads the system config instead.
+    @ViewBuilder
+    private var bridgeFixChip: some View {
+        if let plan = bridgeFixPlan, !plan.isEmpty {
+            if isFixingBridge {
+                ProgressView().controlSize(.small)
+            } else {
+                Button {
+                    runBridgeFix()
+                } label: {
+                    Label("Fix Thunderbolt config", systemImage: "wrench.and.screwdriver.fill")
+                }
+                .font(.caption)
+                .tint(.orange)
+                .help(bridgeFixHelp(plan))
+            }
+        }
+    }
+
+    private func bridgeFixHelp(_ plan: ThunderboltBridgeFix.Plan) -> String {
+        var parts: [String] = []
+        if !plan.bridgesToRemove.isEmpty {
+            parts.append("remove the Thunderbolt Bridge virtual interface (\(plan.bridgesToRemove.joined(separator: ", ")))")
+        }
+        if !plan.portsNeedingService.isEmpty {
+            parts.append("create per-port network services for \(plan.portsNeedingService.joined(separator: ", "))")
+        }
+        return "This machine's network config would break RDMA after a reboot. Fix will \(parts.joined(separator: " and ")) (admin password required)."
+    }
+
+    private func refreshBridgeFixPlan() async {
+        guard LocalNetwork.hostRefersToThisMachine(host) else {
+            bridgeFixPlan = nil
+            return
+        }
+        bridgeFixPlan = await Task.detached {
+            ThunderboltBridgeFix.plan(for: ThunderboltBridgeFixer.snapshot())
+        }.value
+    }
+
+    private func runBridgeFix() {
+        isFixingBridge = true
+        Task {
+            let result = await Task.detached {
+                Result { try ThunderboltBridgeFixer.fix() }
+            }.value
+            isFixingBridge = false
+            switch result {
+            case .success(let outcome):
+                var lines: [String] = []
+                if !outcome.plan.bridgesToRemove.isEmpty {
+                    lines.append("Removed \(outcome.plan.bridgesToRemove.joined(separator: ", ")).")
+                }
+                if !outcome.createdServices.isEmpty {
+                    lines.append("Created services: \(outcome.createdServices.joined(separator: ", ")).")
+                }
+                if outcome.ranRuntimeKick {
+                    lines.append("Dissolved the live bridge without a reboot.")
+                }
+                bridgeFixMessage = lines.isEmpty
+                    ? "Nothing needed fixing."
+                    : lines.joined(separator: "\n")
+                await refreshBridgeFixPlan()
+                let check = await model.settings.resolveAndTestCondaPrefix()
+                await store.runVerify(envPrefix: check.ok ? check.prefix : nil)
+            case .failure(let error):
+                bridgeFixMessage = error.localizedDescription
+            }
         }
     }
 
