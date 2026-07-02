@@ -133,10 +133,22 @@ if [[ -n "$HOSTS" ]]; then
 fi
 
 # ---------
+# Locate mlx.launch: repo-local venv (uv) first, then conda
+# ---------
+if [[ -x "$REPO_DIR/$ENV_NAME/bin/mlx.launch" ]]; then
+  LAUNCH=("$REPO_DIR/$ENV_NAME/bin/mlx.launch")
+elif command -v conda >/dev/null 2>&1; then
+  LAUNCH=(conda run -n "$ENV_NAME" mlx.launch)
+else
+  echo "ERROR: no mlx.launch found at $REPO_DIR/$ENV_NAME/bin/mlx.launch and conda is not installed."
+  exit 1
+fi
+
+# ---------
 # Start the server
 # ---------
 echo "Starting cluster server..."
-conda run -n "$ENV_NAME" mlx.launch --verbose --backend jaccl \
+"${LAUNCH[@]}" --verbose --backend jaccl \
   --hostfile "$HOSTFILE" \
   --env MLX_METAL_FAST_SYNCH=1 \
   --env HF_HUB_OFFLINE=1 \

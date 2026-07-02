@@ -311,7 +311,9 @@ def _stream_request_blocking(loop: asyncio.AbstractEventLoop, kind: str, prompt:
     req_id = f"chatcmpl-{uuid.uuid4().hex[:24]}" if kind == "chat" else f"cmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
 
+    completion_tokens = 0
     for response in stream_generate(_model, _tok, prompt, max_tokens=max_t):
+        completion_tokens += 1
         token_text = response.text  # GenerationResponse.text contains the decoded text
         if kind == "chat":
             chunk = {
@@ -342,7 +344,14 @@ def _stream_request_blocking(loop: asyncio.AbstractEventLoop, kind: str, prompt:
 
     mx.eval()
 
-    # Send final chunk with finish_reason
+    pt = _tok_len(prompt)
+    usage = {
+        "prompt_tokens": pt,
+        "completion_tokens": completion_tokens,
+        "total_tokens": pt + completion_tokens,
+    }
+
+    # Send final chunk with finish_reason (usage rides along, mlx_lm.server-style)
     if kind == "chat":
         final_chunk = {
             "id": req_id,
@@ -354,6 +363,7 @@ def _stream_request_blocking(loop: asyncio.AbstractEventLoop, kind: str, prompt:
                 "delta": {},
                 "finish_reason": "stop",
             }],
+            "usage": usage,
         }
     else:
         final_chunk = {
@@ -367,6 +377,7 @@ def _stream_request_blocking(loop: asyncio.AbstractEventLoop, kind: str, prompt:
                 "finish_reason": "stop",
                 "logprobs": None,
             }],
+            "usage": usage,
         }
     put(f"data: {json.dumps(final_chunk)}\n\n")
     put("data: [DONE]\n\n")
