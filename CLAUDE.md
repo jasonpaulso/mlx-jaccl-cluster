@@ -18,6 +18,8 @@ So there are two independent transports: RDMA/Thunderbolt (JACCL collectives ins
 
 Requests are processed **strictly sequentially** (queue depth `QUEUE_MAX`, default 8; a full queue returns HTTP 429). No batching.
 
+The control-plane speaks three task types: `task` (generate → `done`), `scan` (worker reports its complete model dirs under `MODELS_DIR`), and `load` (lockstep model switch → `done` or `error`). Model identity is lockstep state like everything else: `/v1/models` lists only models complete on **every** rank whose `model_type` maps to an `mlx_lm.models` module defining `shard()`. Naming another available model in a request (or `POST /v1/models/load`) makes all ranks unload + `sharded_load` the new one in lockstep before generating. On a clean partial load failure the previous model is rolled back everywhere; if a rank goes silent mid-load the server marks itself `degraded` in `/health` (`ok:false`) and refuses further switches — only a restart recovers. All control-socket reads happen on the single gen thread; never read them from anywhere else.
+
 ## Running things
 
 There is nothing to install per-checkout. Setup (conda env `mlxjccl`, RDMA enablement in macOS Recovery, mesh cabling) is a one-time per-machine process documented in `docs/from-scratch.md`.

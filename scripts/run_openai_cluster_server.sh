@@ -58,6 +58,8 @@ HTTP_PORT="${HTTP_PORT:-8080}"
 CTRL_PORT="${CTRL_PORT:-18080}"
 QUEUE_MAX="${QUEUE_MAX:-8}"
 REQ_TIMEOUT="${REQ_TIMEOUT:-120}"
+MODELS_DIR="${MODELS_DIR:-$HOME/models_mlx}"
+LOAD_TIMEOUT="${LOAD_TIMEOUT:-600}"
 
 # ---------
 # Validate paths
@@ -160,5 +162,7 @@ echo "Starting cluster server..."
   --env CTRL_HOST="$CTRL_HOST" \
   --env CTRL_PORT="$CTRL_PORT" \
   --env QUEUE_MAX="$QUEUE_MAX" \
-  --env REQ_TIMEOUT="$REQ_TIMEOUT" -- \
+  --env REQ_TIMEOUT="$REQ_TIMEOUT" \
+  --env MODELS_DIR="$MODELS_DIR" \
+  --env LOAD_TIMEOUT="$LOAD_TIMEOUT" -- \
   "$SERVER_PY"
