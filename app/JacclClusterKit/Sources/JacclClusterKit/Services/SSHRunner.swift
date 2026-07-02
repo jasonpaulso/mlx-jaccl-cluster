@@ -25,11 +25,39 @@ public struct SSHRunner: Sendable {
         )
     }
 
+    /// Like `run`, but when ssh itself dies silently (exit 255 with no output —
+    /// the connection/auth layer failed before anything ran), retries once with
+    /// LogLevel=DEBUG1 so the failure names its layer instead of being mute.
+    public func runExplained(host: String, command: String, timeout: TimeInterval = 15) async throws -> ProcessResult {
+        let result = try await run(host: host, command: command, timeout: timeout)
+        let silentFailure = result.exitCode == 255
+            && !result.timedOut
+            && result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard silentFailure else { return result }
+
+        guard let debug = try? await ProcessRunner.run(
+            executable: "/usr/bin/ssh",
+            arguments: baseOptions + ["-o", "LogLevel=DEBUG1", host, command],
+            timeout: timeout
+        ) else { return result }
+        let tail = debug.stderr
+            .split(separator: "\n")
+            .suffix(6)
+            .joined(separator: "\n")
+        guard !tail.isEmpty else { return result }
+        return ProcessResult(
+            exitCode: result.exitCode,
+            stdout: result.stdout,
+            stderr: "ssh diagnostic tail:\n\(tail)",
+            timedOut: false
+        )
+    }
+
     /// Same pkill the shell scripts use; pkill exits 1 when nothing matched,
     /// which counts as success here.
     public func pkillServer(host: String) async -> Result<Void, SSHError> {
         do {
-            let result = try await run(host: host, command: "pkill -f openai_cluster_server.py || true", timeout: 15)
+            let result = try await runExplained(host: host, command: "pkill -f openai_cluster_server.py || true", timeout: 15)
             if result.timedOut {
                 return .failure(.timeout(host: host))
             }

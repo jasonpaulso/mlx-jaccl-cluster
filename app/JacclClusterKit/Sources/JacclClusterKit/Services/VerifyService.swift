@@ -10,6 +10,9 @@ public struct NodeCheckResult: Identifiable, Sendable, Equatable {
     /// Whether the python env exists on the node at rank 0's prefix path
     /// (nil = not checked, e.g. no prefix resolved locally).
     public var envOK: Bool?
+    /// The node's live IPv4 addresses (loopback excluded) — feeds the
+    /// coordinator-IP suggestions and the stale-IP preflight.
+    public var ipv4Addresses: [String]
     /// Humanized failure detail when sshOK is false.
     public var failureHint: String?
     public var checkedAt: Date
@@ -18,12 +21,14 @@ public struct NodeCheckResult: Identifiable, Sendable, Equatable {
 
     public init(host: String, sshOK: Bool = false, remoteHostname: String? = nil,
                 rdmaDevices: [String] = [], envOK: Bool? = nil,
+                ipv4Addresses: [String] = [],
                 failureHint: String? = nil, checkedAt: Date = Date()) {
         self.host = host
         self.sshOK = sshOK
         self.remoteHostname = remoteHostname
         self.rdmaDevices = rdmaDevices
         self.envOK = envOK
+        self.ipv4Addresses = ipv4Addresses
         self.failureHint = failureHint
         self.checkedAt = checkedAt
     }
@@ -67,7 +72,7 @@ public struct VerifyService: Sendable {
     public func verifyNode(host: String, envPrefix: String? = nil) async -> NodeCheckResult {
         var result = NodeCheckResult(host: host)
         do {
-            let hostnameRun = try await ssh.run(host: host, command: "hostname", timeout: 12)
+            let hostnameRun = try await ssh.runExplained(host: host, command: "hostname", timeout: 12)
             if hostnameRun.timedOut {
                 result.failureHint = "SSH timed out."
                 return result
@@ -89,6 +94,18 @@ public struct VerifyService: Sendable {
                     .split(separator: "\n")
                     .map { $0.trimmingCharacters(in: .whitespaces) }
                     .filter { !$0.isEmpty }
+            }
+
+            let ipsRun = try await ssh.run(
+                host: host,
+                command: #"ifconfig -a 2>/dev/null | awk '/inet /{print $2}'"#,
+                timeout: 12
+            )
+            if ipsRun.exitCode == 0 {
+                result.ipv4Addresses = ipsRun.stdout
+                    .split(separator: "\n")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty && $0 != "127.0.0.1" }
             }
 
             if let envPrefix {

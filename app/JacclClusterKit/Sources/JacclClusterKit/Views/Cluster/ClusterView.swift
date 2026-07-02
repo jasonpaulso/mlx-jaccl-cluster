@@ -225,7 +225,21 @@ struct NodeRow: View {
                         TextField("coordinator LAN IP", text: coordinatorIPBinding)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 160)
-                            .help("Rank 0 LAN IP used as CTRL_HOST (ips[0] in the hostfile).")
+                            .help("Rank 0 LAN IP used as CTRL_HOST (ips[0] in the hostfile). Must be an address this node currently has — JACCL binds it.")
+                        if !coordinatorIPSuggestions.isEmpty {
+                            Menu {
+                                ForEach(coordinatorIPSuggestions, id: \.self) { ip in
+                                    Button(ip) {
+                                        coordinatorIPBinding.wrappedValue = ip
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "chevron.down.circle")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                            .help("Rank 0's current IPv4 addresses")
+                        }
                     }
 
                     verifyChip
@@ -250,6 +264,22 @@ struct NodeRow: View {
 
     private var host: String {
         store.document.hosts.indices.contains(index) ? store.document.hosts[index].ssh : ""
+    }
+
+    /// Rank 0's live addresses: from the last verify when available, else
+    /// from this Mac's interfaces when rank 0 is this machine. Link-local
+    /// (169.254.x, e.g. Thunderbolt) sorted last.
+    private var coordinatorIPSuggestions: [String] {
+        var ips = store.verifyResults[host]?.ipv4Addresses ?? []
+        if ips.isEmpty && LocalNetwork.hostRefersToThisMachine(host) {
+            ips = LocalNetwork.ipv4Interfaces().map(\.address)
+        }
+        return ips.sorted { a, b in
+            let aLocal = a.hasPrefix("169.254.")
+            let bLocal = b.hasPrefix("169.254.")
+            if aLocal != bLocal { return !aLocal }
+            return a < b
+        }
     }
 
     @ViewBuilder

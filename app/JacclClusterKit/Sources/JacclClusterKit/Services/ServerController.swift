@@ -108,6 +108,39 @@ public final class ServerController {
             return
         }
 
+        // Stale-coordinator preflight: JACCL binds ips[0] on rank 0 and dies
+        // with "Couldn't bind socket (error: 49)" when the address isn't
+        // assigned there (classic after a network change). Catch it here.
+        let rank0Host = document.hosts[0].ssh
+        if LocalNetwork.hostRefersToThisMachine(rank0Host) {
+            let interfaces = LocalNetwork.ipv4Interfaces()
+            if !interfaces.isEmpty, !interfaces.contains(where: { $0.address == ctrlHost }) {
+                let available = interfaces.map { "\($0.address) (\($0.name))" }.joined(separator: ", ")
+                lastError = """
+                Coordinator IP \(ctrlHost) isn't assigned to this Mac (rank 0). \
+                Current addresses: \(available). Update ips[0] in the Cluster tab — \
+                JACCL binds this address and fails otherwise.
+                """
+                return
+            }
+        } else if let probe = try? await ssh.run(
+            host: rank0Host,
+            command: #"ifconfig -a 2>/dev/null | awk '/inet /{print $2}'"#,
+            timeout: 12
+        ), probe.exitCode == 0 {
+            let remoteIPs = probe.stdout.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+            if !remoteIPs.isEmpty, !remoteIPs.contains(ctrlHost) {
+                let available = remoteIPs.filter { $0 != "127.0.0.1" }.joined(separator: ", ")
+                lastError = """
+                Coordinator IP \(ctrlHost) isn't assigned to rank 0 (\(rank0Host)). \
+                Its addresses: \(available). Update ips[0] in the Cluster tab.
+                """
+                return
+            }
+        }
+        // (If the ssh probe fails we proceed — the preflight must not add a
+        // new failure mode of its own.)
+
         let check = await settings.resolveAndTestCondaPrefix()
         guard check.ok else {
             lastError = check.detail
