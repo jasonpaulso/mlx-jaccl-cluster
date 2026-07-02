@@ -23,7 +23,9 @@ You get:
 cluster without a terminal:
 
 - **Cluster** — edit the hostfile (nodes, coordinator IP, RDMA adjacency matrix with
-  live `ibv_devices` cross-checks), verify SSH/RDMA per node.
+  live `ibv_devices` cross-checks), verify SSH/RDMA/env per node, and **set up worker
+  nodes** (copies rank 0's repo + python environment to each node at identical paths
+  over rsync — no terminal needed on workers beyond RDMA enablement).
 - **Server** — start/stop the OpenAI-compatible server with live logs and
   `/health` + `/queue` polling.
 - **Models** — search MLX models on HuggingFace, download them (resumable, checksummed),

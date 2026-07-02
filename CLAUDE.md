@@ -68,3 +68,8 @@ local Swift package `app/JacclClusterKit/` (Swift 6 language mode).
   CLI path.
 - `/usr/bin/rsync` on macOS is openrsync (no `--info=progress2`; classic `--progress`
   only) — the sync engine's progress parser handles both flavors.
+- **Node provisioning replicates, never installs**: "Set up node" rsyncs rank 0's repo,
+  python interpreter (uv-managed trees under $HOME), and env to the worker at identical
+  absolute paths, then verifies `import mlx.core, mlx_lm, fastapi, uvicorn` remotely.
+  This guarantees identical wheel versions on every rank; don't replace it with remote
+  pip/uv installs.

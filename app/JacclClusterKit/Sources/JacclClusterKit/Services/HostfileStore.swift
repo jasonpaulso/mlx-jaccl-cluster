@@ -129,11 +129,11 @@ public final class HostfileStore {
         document.hosts.map(\.ssh)
     }
 
-    public func runVerify() async {
+    public func runVerify(envPrefix: String? = nil) async {
         guard !isVerifying else { return }
         isVerifying = true
         defer { isVerifying = false }
-        let results = await verifyService.verify(hosts: hosts)
+        let results = await verifyService.verify(hosts: hosts, envPrefix: envPrefix)
         var map: [String: NodeCheckResult] = [:]
         for result in results {
             map[result.host] = result

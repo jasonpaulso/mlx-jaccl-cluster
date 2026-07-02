@@ -7,6 +7,9 @@ public struct NodeCheckResult: Identifiable, Sendable, Equatable {
     public var sshOK: Bool
     public var remoteHostname: String?
     public var rdmaDevices: [String]
+    /// Whether the python env exists on the node at rank 0's prefix path
+    /// (nil = not checked, e.g. no prefix resolved locally).
+    public var envOK: Bool?
     /// Humanized failure detail when sshOK is false.
     public var failureHint: String?
     public var checkedAt: Date
@@ -14,11 +17,13 @@ public struct NodeCheckResult: Identifiable, Sendable, Equatable {
     public var id: String { host }
 
     public init(host: String, sshOK: Bool = false, remoteHostname: String? = nil,
-                rdmaDevices: [String] = [], failureHint: String? = nil, checkedAt: Date = Date()) {
+                rdmaDevices: [String] = [], envOK: Bool? = nil,
+                failureHint: String? = nil, checkedAt: Date = Date()) {
         self.host = host
         self.sshOK = sshOK
         self.remoteHostname = remoteHostname
         self.rdmaDevices = rdmaDevices
+        self.envOK = envOK
         self.failureHint = failureHint
         self.checkedAt = checkedAt
     }
@@ -43,10 +48,12 @@ public struct VerifyService: Sendable {
     }
 
     /// Fans out over all hosts concurrently; one slow node doesn't serialize the rest.
-    public func verify(hosts: [String]) async -> [NodeCheckResult] {
+    /// When `envPrefix` is set, each node is also checked for a python env at
+    /// that path (rank 0's prefix must exist verbatim on every node).
+    public func verify(hosts: [String], envPrefix: String? = nil) async -> [NodeCheckResult] {
         await withTaskGroup(of: NodeCheckResult.self) { group in
             for host in hosts {
-                group.addTask { await self.verifyNode(host: host) }
+                group.addTask { await self.verifyNode(host: host, envPrefix: envPrefix) }
             }
             var results: [NodeCheckResult] = []
             for await result in group {
@@ -57,7 +64,7 @@ public struct VerifyService: Sendable {
         }
     }
 
-    public func verifyNode(host: String) async -> NodeCheckResult {
+    public func verifyNode(host: String, envPrefix: String? = nil) async -> NodeCheckResult {
         var result = NodeCheckResult(host: host)
         do {
             let hostnameRun = try await ssh.run(host: host, command: "hostname", timeout: 12)
@@ -82,6 +89,15 @@ public struct VerifyService: Sendable {
                     .split(separator: "\n")
                     .map { $0.trimmingCharacters(in: .whitespaces) }
                     .filter { !$0.isEmpty }
+            }
+
+            if let envPrefix {
+                let envRun = try await ssh.run(
+                    host: host,
+                    command: "test -x '\(envPrefix)/bin/python3' || test -x '\(envPrefix)/bin/python'",
+                    timeout: 12
+                )
+                result.envOK = (envRun.exitCode == 0)
             }
         } catch {
             result.failureHint = error.localizedDescription

@@ -10,6 +10,7 @@ public final class AppModel {
     public let hostfiles: HostfileStore
     public let server: ServerController
     public let library: ModelLibraryStore
+    public let provisioning: ProvisioningStore
 
     public init() {
         let settings = SettingsStore()
@@ -18,6 +19,7 @@ public final class AppModel {
         self.hostfiles = hostfiles
         self.server = ServerController(settings: settings, hostfileStore: hostfiles)
         self.library = ModelLibraryStore(settings: settings)
+        self.provisioning = ProvisioningStore(settings: settings)
 
         hostfiles.refreshAvailableHostfiles(repoURL: settings.config.repoURL)
         if let url = settings.config.hostfileURL, FileManager.default.fileExists(atPath: url.path) {

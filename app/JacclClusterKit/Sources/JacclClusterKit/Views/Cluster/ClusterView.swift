@@ -97,7 +97,12 @@ public struct ClusterView: View {
             }
 
             Button {
-                Task { await store.runVerify() }
+                Task {
+                    // Resolve the env prefix first so verify can also check
+                    // that each node has the env at the same path.
+                    let check = await model.settings.resolveAndTestCondaPrefix()
+                    await store.runVerify(envPrefix: check.ok ? check.prefix : nil)
+                }
             } label: {
                 if store.isVerifying {
                     ProgressView().controlSize(.small)
@@ -203,38 +208,113 @@ struct NodeRow: View {
 
     var body: some View {
         if store.document.hosts.indices.contains(index) {
-            HStack(spacing: 10) {
-                Text(index == 0 ? "rank 0" : "rank \(index)")
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(index == 0 ? Color.accentColor.opacity(0.2) : Color.gray.opacity(0.15),
-                                in: Capsule())
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 10) {
+                    Text(index == 0 ? "rank 0" : "rank \(index)")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(index == 0 ? Color.accentColor.opacity(0.2) : Color.gray.opacity(0.15),
+                                    in: Capsule())
 
-                TextField("ssh host", text: sshBinding)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 200)
-
-                if index == 0 {
-                    TextField("coordinator LAN IP", text: coordinatorIPBinding)
+                    TextField("ssh host", text: sshBinding)
                         .textFieldStyle(.roundedBorder)
-                        .frame(width: 160)
-                        .help("Rank 0 LAN IP used as CTRL_HOST (ips[0] in the hostfile).")
+                        .frame(width: 200)
+
+                    if index == 0 {
+                        TextField("coordinator LAN IP", text: coordinatorIPBinding)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 160)
+                            .help("Rank 0 LAN IP used as CTRL_HOST (ips[0] in the hostfile).")
+                    }
+
+                    verifyChip
+                    envChip
+                    setupButton
+
+                    Spacer()
+
+                    Button(role: .destructive) {
+                        store.document.removeNode(at: index)
+                        store.markEdited()
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Remove node (also removes its matrix column)")
                 }
-
-                verifyChip
-
-                Spacer()
-
-                Button(role: .destructive) {
-                    store.document.removeNode(at: index)
-                    store.markEdited()
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .buttonStyle(.borderless)
-                .help("Remove node (also removes its matrix column)")
+                provisioningStatus
             }
+        }
+    }
+
+    private var host: String {
+        store.document.hosts.indices.contains(index) ? store.document.hosts[index].ssh : ""
+    }
+
+    @ViewBuilder
+    private var envChip: some View {
+        if let result = store.verifyResults[host], result.sshOK, let envOK = result.envOK {
+            if envOK {
+                Label("env", systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+                    .help("Python environment found at rank 0's prefix path")
+            } else {
+                Label("env missing", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .help("No python environment at rank 0's prefix path — use Set up node")
+            }
+        }
+    }
+
+    /// Copies rank 0's repo + python env to the node at identical paths, so no
+    /// terminal setup is needed on workers (RDMA enablement excepted).
+    @ViewBuilder
+    private var setupButton: some View {
+        if index != 0,
+           let result = store.verifyResults[host], result.sshOK,
+           result.envOK != true || model.provisioning.state(for: host) == .succeeded {
+            switch model.provisioning.state(for: host) {
+            case .running:
+                ProgressView().controlSize(.small)
+            case .succeeded:
+                Label("set up", systemImage: "checkmark.seal.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            default:
+                Button("Set up node") {
+                    model.provisioning.provision(host: host)
+                }
+                .font(.caption)
+                .help("Copy the repo and python environment from this Mac to \(host) (same absolute paths), then verify imports there.")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var provisioningStatus: some View {
+        switch model.provisioning.state(for: host) {
+        case .running(let detail, let transferredBytes):
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+                if transferredBytes > 0 {
+                    Text(ByteCountFormatter.string(fromByteCount: transferredBytes, countStyle: .file))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.leading, 52)
+        case .failed(let message):
+            Label(message, systemImage: "xmark.octagon.fill")
+                .font(.caption)
+                .foregroundStyle(.red)
+                .textSelection(.enabled)
+                .padding(.leading, 52)
+        default:
+            EmptyView()
         }
     }
 
