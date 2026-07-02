@@ -116,6 +116,40 @@ final class HostfileTests: XCTestCase {
         XCTAssertEqual(doc.hosts.map(\.rdma), original.hosts.map(\.rdma))
     }
 
+    @MainActor
+    func testCreateFromExampleThrowsWhenFolderIsNotARepo() throws {
+        // Regression: an empty folder as repo path must produce a descriptive
+        // error, not a silent no-op.
+        let emptyDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: emptyDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: emptyDir) }
+
+        let store = HostfileStore()
+        XCTAssertThrowsError(try store.createFromExample(repoURL: emptyDir)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("hosts.json.example"))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: emptyDir.appendingPathComponent("hostfiles/hosts.json").path))
+    }
+
+    @MainActor
+    func testCreateFromExampleCopiesAndIsIdempotent() throws {
+        let repoDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: repoDir.appendingPathComponent("hostfiles"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: repoDir) }
+        try fixtureData("hosts-4node.json").write(to: repoDir.appendingPathComponent("hostfiles/hosts.json.example"))
+
+        let store = HostfileStore()
+        let created = try store.createFromExample(repoURL: repoDir)
+        XCTAssertEqual(created.lastPathComponent, "hosts.json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: created.path))
+        let doc = try HostfileDocument.load(from: created)
+        XCTAssertEqual(doc.hosts.count, 4)
+
+        // Second call returns the existing file instead of failing.
+        let again = try store.createFromExample(repoURL: repoDir)
+        XCTAssertEqual(again.path, created.path)
+    }
+
     func testSaveIsConsumableAndStable() throws {
         let doc = try HostfileDocument.decode(from: try fixtureData("hosts-4node.json"))
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

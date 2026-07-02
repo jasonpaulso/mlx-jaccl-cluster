@@ -1,6 +1,21 @@
 import Foundation
 import Observation
 
+public enum HostfileStoreError: Error, LocalizedError, Sendable {
+    case exampleMissing(repoPath: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .exampleMissing(let repoPath):
+            return """
+            hostfiles/hosts.json.example not found in \(repoPath). \
+            Settings → Repo path must point at a checkout of the mlx-jaccl-cluster repo \
+            (the folder containing hostfiles/, server/, and scripts/).
+            """
+        }
+    }
+}
+
 /// Owns the loaded hostfile document, its dirty state, and the list of
 /// available hostfiles under `<repo>/hostfiles/`. Shared by the form editor,
 /// the raw-JSON source tab, and everything that needs host lists.
@@ -43,14 +58,23 @@ public final class HostfileStore {
     }
 
     /// Copies hosts.json.example → hosts.json (the gitignored working file).
+    /// Throws a descriptive error when the repo path isn't actually a checkout.
     @discardableResult
-    public func createFromExample(repoURL: URL) -> URL? {
+    public func createFromExample(repoURL: URL) throws -> URL {
         let example = repoURL.appendingPathComponent("hostfiles/hosts.json.example")
         let target = repoURL.appendingPathComponent("hostfiles/hosts.json")
-        guard FileManager.default.fileExists(atPath: example.path),
-              !FileManager.default.fileExists(atPath: target.path)
-        else { return FileManager.default.fileExists(atPath: target.path) ? target : nil }
-        try? FileManager.default.copyItem(at: example, to: target)
+        if FileManager.default.fileExists(atPath: target.path) {
+            refreshAvailableHostfiles(repoURL: repoURL)
+            return target
+        }
+        guard FileManager.default.fileExists(atPath: example.path) else {
+            throw HostfileStoreError.exampleMissing(repoPath: repoURL.path)
+        }
+        try FileManager.default.createDirectory(
+            at: target.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.copyItem(at: example, to: target)
         refreshAvailableHostfiles(repoURL: repoURL)
         return target
     }

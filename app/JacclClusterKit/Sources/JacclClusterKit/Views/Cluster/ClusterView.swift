@@ -3,7 +3,7 @@ import SwiftUI
 public struct ClusterView: View {
     @Bindable var model: AppModel
     @State private var tab: Tab = .form
-    @State private var saveError: String?
+    @State private var actionError: String?
 
     enum Tab: String, CaseIterable {
         case form = "Form"
@@ -43,15 +43,15 @@ public struct ClusterView: View {
         }
         .navigationTitle("Cluster")
         .alert(
-            "Save failed",
+            "Hostfile error",
             isPresented: Binding(
-                get: { saveError != nil },
-                set: { if !$0 { saveError = nil } }
+                get: { actionError != nil },
+                set: { if !$0 { actionError = nil } }
             )
         ) {
-            Button("OK") { saveError = nil }
+            Button("OK") { actionError = nil }
         } message: {
-            Text(saveError ?? "")
+            Text(actionError ?? "")
         }
     }
 
@@ -70,8 +70,11 @@ public struct ClusterView: View {
             if let repoURL = model.settings.config.repoURL,
                !FileManager.default.fileExists(atPath: repoURL.appendingPathComponent("hostfiles/hosts.json").path) {
                 Button("Create from example") {
-                    if let created = store.createFromExample(repoURL: repoURL) {
+                    do {
+                        let created = try store.createFromExample(repoURL: repoURL)
                         selectHostfile(path: created.path)
+                    } catch {
+                        actionError = error.localizedDescription
                     }
                 }
             }
@@ -87,7 +90,7 @@ public struct ClusterView: View {
             if store.isDirty {
                 Button("Revert") { store.revert() }
                 Button("Save") {
-                    do { try store.save() } catch { saveError = error.localizedDescription }
+                    do { try store.save() } catch { actionError = error.localizedDescription }
                 }
                 .keyboardShortcut("s")
                 .buttonStyle(.borderedProminent)

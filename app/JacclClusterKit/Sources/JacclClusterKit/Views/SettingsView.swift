@@ -20,9 +20,7 @@ public struct SettingsView: View {
                     TextField("Repo path", text: $settings.config.repoPath, prompt: Text("/path/to/mlx-jaccl repo"))
                     Button("Choose…") { showRepoImporter = true }
                 }
-                Text("Checkout containing hostfiles/, server/, scripts/.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                repoValidationHint
             }
 
             Section("Conda environment") {
@@ -92,6 +90,36 @@ public struct SettingsView: View {
         }
         .onDisappear {
             model.settingsChanged()
+        }
+    }
+
+    /// Live check that the repo path is actually a checkout of this repo —
+    /// everything downstream (hostfile picker, Create-from-example, server
+    /// launch) depends on it.
+    @ViewBuilder
+    private var repoValidationHint: some View {
+        if let repo = model.settings.config.repoURL {
+            let hasServer = FileManager.default.fileExists(
+                atPath: repo.appendingPathComponent("server/openai_cluster_server.py").path)
+            let hasExample = FileManager.default.fileExists(
+                atPath: repo.appendingPathComponent("hostfiles/hosts.json.example").path)
+            if hasServer && hasExample {
+                Label("Repo checkout detected", systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            } else {
+                Label(
+                    "This folder doesn't look like the mlx-jaccl-cluster repo — missing " +
+                    (hasServer ? "hostfiles/hosts.json.example" : "server/openai_cluster_server.py") + ".",
+                    systemImage: "xmark.octagon.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.red)
+            }
+        } else {
+            Text("Checkout containing hostfiles/, server/, scripts/.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }
