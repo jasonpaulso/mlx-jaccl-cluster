@@ -130,7 +130,7 @@ private struct MatrixCellField: View {
         if device.wholeMatch(of: #/rdma_en\d+/#) == nil { return .red }
         switch store.cellStatus(row: row, column: column) {
         case .confirmed: return .green
-        case .missing: return .orange
+        case .missing, .noIPv6: return .orange
         case .unverified: return .gray.opacity(0.5)
         }
     }
@@ -144,6 +144,7 @@ private struct MatrixCellField: View {
         switch store.cellStatus(row: row, column: column) {
         case .confirmed: text += " — confirmed by ibv_devices"
         case .missing: text += " — NOT reported by ibv_devices on \(from)"
+        case .noIPv6: text += " — exists, but its port has no IPv6 link-local (remove it from the Thunderbolt Bridge in System Settings → Network); JACCL fails with RTR errno 96 otherwise"
         case .unverified: text += " — run Verify to cross-check"
         }
         return text

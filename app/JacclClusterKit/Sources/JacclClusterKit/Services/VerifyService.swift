@@ -10,6 +10,11 @@ public struct NodeCheckResult: Identifiable, Sendable, Equatable {
     /// Devices whose Thunderbolt interface reports an active link — i.e. a
     /// cable is actually plugged in there. These are the right matrix choices.
     public var activeRdmaDevices: [String]
+    /// Devices whose interface has no IPv6 link-local — usually because it's
+    /// captured by the Thunderbolt Bridge. Their RDMA GID table is empty, so
+    /// the QP handshake fails with "Changing queue pair to RTR failed with
+    /// errno 96" (ENODATA).
+    public var devicesMissingIPv6: [String]
     /// Whether the python env exists on the node at rank 0's prefix path
     /// (nil = not checked, e.g. no prefix resolved locally).
     public var envOK: Bool?
@@ -24,6 +29,7 @@ public struct NodeCheckResult: Identifiable, Sendable, Equatable {
 
     public init(host: String, sshOK: Bool = false, remoteHostname: String? = nil,
                 rdmaDevices: [String] = [], activeRdmaDevices: [String] = [],
+                devicesMissingIPv6: [String] = [],
                 envOK: Bool? = nil,
                 ipv4Addresses: [String] = [],
                 failureHint: String? = nil, checkedAt: Date = Date()) {
@@ -32,6 +38,7 @@ public struct NodeCheckResult: Identifiable, Sendable, Equatable {
         self.remoteHostname = remoteHostname
         self.rdmaDevices = rdmaDevices
         self.activeRdmaDevices = activeRdmaDevices
+        self.devicesMissingIPv6 = devicesMissingIPv6
         self.envOK = envOK
         self.ipv4Addresses = ipv4Addresses
         self.failureHint = failureHint
@@ -48,6 +55,9 @@ public enum MatrixCellStatus: Sendable, Equatable {
     case confirmed
     /// Node was verified but does not report this device.
     case missing
+    /// Device exists but its interface has no IPv6 link-local (Thunderbolt
+    /// Bridge member) — JACCL's QP handshake will fail on it.
+    case noIPv6
 }
 
 public struct VerifyService: Sendable {
@@ -89,17 +99,20 @@ public struct VerifyService: Sendable {
             result.sshOK = true
             result.remoteHostname = hostnameRun.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
 
-            // One pass: each rdma_enN device plus the link status of its enN
-            // Thunderbolt interface (active = a cable is plugged in there).
+            // One pass per device: link status of its enN Thunderbolt
+            // interface (active = cable plugged in) and whether it has an
+            // IPv6 link-local (no fe80 = empty GID table = RTR errno 96,
+            // typically because the port is a Thunderbolt Bridge member).
             let devicesRun = try await ssh.run(
                 host: host,
-                command: #"for d in $(ibv_devices 2>/dev/null | grep -oE 'rdma_en[0-9]+'); do i="${d#rdma_}"; s=$(ifconfig "$i" 2>/dev/null | awk '/status:/{print $2}'); echo "$d ${s:-unknown}"; done"#,
+                command: #"for d in $(ibv_devices 2>/dev/null | grep -oE 'rdma_en[0-9]+'); do i="${d#rdma_}"; s=$(ifconfig "$i" 2>/dev/null | awk '/status:/{print $2}'); ll=$(ifconfig "$i" 2>/dev/null | awk '/inet6 fe80/{print "ll"; exit}'); echo "$d ${s:-unknown} ${ll:-noll}"; done"#,
                 timeout: 12
             )
             if devicesRun.exitCode == 0 {
                 let parsed = Self.parseDeviceStatus(devicesRun.stdout)
                 result.rdmaDevices = parsed.devices
                 result.activeRdmaDevices = parsed.active
+                result.devicesMissingIPv6 = parsed.missingIPv6
             }
 
             let ipsRun = try await ssh.run(
@@ -128,10 +141,11 @@ public struct VerifyService: Sendable {
         return result
     }
 
-    /// Parses "rdma_enN <status>" lines from the device+link probe.
-    static func parseDeviceStatus(_ output: String) -> (devices: [String], active: [String]) {
+    /// Parses "rdma_enN <status> <ll|noll>" lines from the device+link probe.
+    static func parseDeviceStatus(_ output: String) -> (devices: [String], active: [String], missingIPv6: [String]) {
         var devices: [String] = []
         var active: [String] = []
+        var missingIPv6: [String] = []
         for line in output.split(separator: "\n") {
             let parts = line.split(separator: " ")
             guard let device = parts.first, device.hasPrefix("rdma_en") else { continue }
@@ -139,8 +153,11 @@ public struct VerifyService: Sendable {
             if parts.count > 1, parts[1] == "active" {
                 active.append(String(device))
             }
+            if parts.count > 2, parts[2] == "noll" {
+                missingIPv6.append(String(device))
+            }
         }
-        return (devices, active)
+        return (devices, active, missingIPv6)
     }
 
     /// Cross-checks a hostfile row against live verify results.
@@ -153,6 +170,8 @@ public struct VerifyService: Sendable {
     ) -> MatrixCellStatus {
         guard row != column, let device, !device.isEmpty else { return .unverified }
         guard let nodeResult = results[rowHost], nodeResult.sshOK else { return .unverified }
-        return nodeResult.rdmaDevices.contains(device) ? .confirmed : .missing
+        guard nodeResult.rdmaDevices.contains(device) else { return .missing }
+        if nodeResult.devicesMissingIPv6.contains(device) { return .noIPv6 }
+        return .confirmed
     }
 }

@@ -141,26 +141,40 @@ public final class ServerController {
         // (If the ssh probe fails we proceed — the preflight must not add a
         // new failure mode of its own.)
 
-        // RDMA matrix preflight: a device name that doesn't exist on its node
-        // surfaces from JACCL only as the cryptic "Couldn't allocate
-        // protection domain". Cross-check every row against live ibv_devices.
+        // RDMA matrix preflight. Two failure classes JACCL reports cryptically:
+        //  - a device name the node doesn't have → "Couldn't allocate protection domain"
+        //  - a device whose port has no IPv6 link-local (Thunderbolt Bridge
+        //    member → empty GID table) → "Changing queue pair to RTR failed with errno 96"
         for entry in document.hosts {
             let claimed = entry.rdma.compactMap { $0 }.filter { !$0.isEmpty }
             guard !claimed.isEmpty else { continue }
             guard let probe = try? await ssh.run(
                 host: entry.ssh,
-                command: #"ibv_devices 2>/dev/null | grep -oE 'rdma_en[0-9]+' || true"#,
+                command: #"for d in $(ibv_devices 2>/dev/null | grep -oE 'rdma_en[0-9]+'); do i="${d#rdma_}"; ll=$(ifconfig "$i" 2>/dev/null | awk '/inet6 fe80/{print "ll"; exit}'); echo "$d unknown ${ll:-noll}"; done"#,
                 timeout: 12
             ), probe.exitCode == 0 else { continue }
-            let actual = Set(probe.stdout.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) })
-            guard !actual.isEmpty else { continue }
-            let missing = claimed.filter { !actual.contains($0) }
+            let parsed = VerifyService.parseDeviceStatus(probe.stdout)
+            guard !parsed.devices.isEmpty else { continue }
+
+            let missing = claimed.filter { !parsed.devices.contains($0) }
             if !missing.isEmpty {
                 lastError = """
                 \(entry.ssh) has no RDMA device named \(missing.joined(separator: ", ")). \
-                It has: \(actual.sorted().joined(separator: ", ")). Fix that row in the \
+                It has: \(parsed.devices.sorted().joined(separator: ", ")). Fix that row in the \
                 Cluster tab's matrix (Verify suggests devices with an active link) — \
                 JACCL fails with 'Couldn't allocate protection domain' otherwise.
+                """
+                return
+            }
+            let bridged = claimed.filter { parsed.missingIPv6.contains($0) }
+            if !bridged.isEmpty {
+                lastError = """
+                \(bridged.joined(separator: ", ")) on \(entry.ssh) has no IPv6 link-local, \
+                so its RDMA GID table is empty and JACCL fails with 'Changing queue pair \
+                to RTR failed with errno 96'. Usual cause: the port is a Thunderbolt Bridge \
+                member. Fix on that Mac: System Settings → Network → Thunderbolt Bridge → ⋯ \
+                → Manage Virtual Interfaces → remove the port (or delete the bridge), then \
+                re-run Verify.
                 """
                 return
             }

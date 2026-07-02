@@ -243,6 +243,43 @@ Pass offline env vars via `mlx.launch --env`:
 - `HF_HUB_OFFLINE=1`
 - `TRANSFORMERS_OFFLINE=1`
 
+### `[jaccl] Changing queue pair to RTR failed with errno 96`
+
+The RDMA device exists and the link is up, but its port has **no IPv6
+link-local**, so the RDMA GID table is empty and the connection handshake has
+nothing to route with. Usual cause: the port is a member of the **Thunderbolt
+Bridge** (macOS's default), which holds the addresses itself.
+
+Check (on the failing node — an empty GID table apart from GID[0] confirms it):
+
+```bash
+ifconfig bridge0 | grep member         # is your rdma port (e.g. en2) in here?
+ibv_devinfo -v -d rdma_en2 | grep "GID\["
+```
+
+Fix: System Settings → Network → Thunderbolt Bridge → ⋯ → **Manage Virtual
+Interfaces** → remove the port from the bridge (or delete the bridge), so the
+port gets its own `fe80::` address. Then re-check the GID table — an
+`fe80::…` GID entry should appear.
+
+### `[jaccl] Couldn't allocate protection domain`
+
+The hostfile's `rdma` matrix names a device that **doesn't exist on that
+node** (device names differ per machine — e.g. a MacBook may have
+`rdma_en1/2/7` while a Studio has `rdma_en2…7`). Run `ibv_devices` on each
+node and fix the matrix. The connected pair is the port whose interface shows
+`status: active` in `ifconfig` on each side.
+
+### Quick RDMA smoke test (no model needed)
+
+```bash
+mlx.launch --verbose --backend jaccl --hostfile hostfiles/hosts.json -- \
+  python scripts/jaccl_smoke.py
+```
+
+Prints one `[smoke] rank=N … all_sum=[2.0, …]` line per rank when the whole
+RDMA path works.
+
 ### Stop stuck runs (no reboot)
 
 ```bash

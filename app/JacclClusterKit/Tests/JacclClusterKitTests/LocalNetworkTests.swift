@@ -19,14 +19,31 @@ final class LocalNetworkTests: XCTestCase {
 
     func testDeviceStatusParsing() {
         let output = """
-        rdma_en1 inactive
-        rdma_en2 active
-        rdma_en7 unknown
+        rdma_en1 inactive ll
+        rdma_en2 active noll
+        rdma_en7 unknown ll
         garbage line
         """
         let parsed = VerifyService.parseDeviceStatus(output)
         XCTAssertEqual(parsed.devices, ["rdma_en1", "rdma_en2", "rdma_en7"])
         XCTAssertEqual(parsed.active, ["rdma_en2"])
+        XCTAssertEqual(parsed.missingIPv6, ["rdma_en2"], "bridge-captured port: active link but no fe80")
+    }
+
+    func testCellStatusFlagsBridgedDevice() {
+        // Live-debugged failure shape: device exists, link active, but no
+        // link-local because the port sits in the Thunderbolt Bridge.
+        let results = [
+            "mbp.local": NodeCheckResult(
+                host: "mbp.local", sshOK: true,
+                rdmaDevices: ["rdma_en2"], activeRdmaDevices: ["rdma_en2"],
+                devicesMissingIPv6: ["rdma_en2"]
+            ),
+        ]
+        XCTAssertEqual(
+            VerifyService.cellStatus(device: "rdma_en2", row: 0, column: 1, results: results, rowHost: "mbp.local"),
+            .noIPv6
+        )
     }
 
     func testIPv4InterfacesExcludeLoopbackAndParse() {

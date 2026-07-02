@@ -49,6 +49,7 @@ The launcher (`run_openai_cluster_server.sh`) auto-detects `CTRL_HOST` from the 
 - **Custom-tokenizer fallback:** `sharded_load_with_fallback()` catches tokenizer-load failures and manually loads a `tokenization_*.py` from the model dir (e.g. Kimi-K2.5), wrapping it in `TokenizerWrapper` to swallow unsupported `encode`/`decode` kwargs. This same block is duplicated in both `server/openai_cluster_server.py` and `scripts/jaccl_tps_bench.py` — keep them in sync if you touch one.
 - **mlx-lm import drift:** `generate`/`stream_generate` are imported with try/except across `mlx_lm.utils` and `mlx_lm.generate` because the module moved between branches. Preserve that pattern.
 - **Single prompt only** on `/v1/completions` — a list is rejected unless length 1 (distributed mode processes one prompt at a time).
+- **Thunderbolt Bridge breaks JACCL.** A port that's a bridge member has no own IPv6 link-local → empty RDMA GID table → `Changing queue pair to RTR failed with errno 96`. Remove RDMA ports from the bridge (System Settings → Network → Manage Virtual Interfaces). A matrix device name the node doesn't have fails earlier as `Couldn't allocate protection domain`. `scripts/jaccl_smoke.py` exercises the whole RDMA path without a model; see from-scratch.md §10.
 
 ## The macOS app (`app/`)
 
