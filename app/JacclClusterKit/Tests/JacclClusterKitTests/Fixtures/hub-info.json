@@ -1,0 +1,16 @@
+{
+  "_id": "abc123",
+  "id": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+  "modelId": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+  "sha": "0123456789abcdef0123456789abcdef01234567",
+  "gated": false,
+  "tags": ["mlx", "safetensors", "4-bit"],
+  "config": {
+    "model_type": "qwen3",
+    "quantization_config": {
+      "bits": 4,
+      "group_size": 64
+    }
+  },
+  "usedStorage": 2269206328
+}

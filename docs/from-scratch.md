@@ -2,6 +2,12 @@
 
 This guide sets up a 4‑Mac, fully connected Thunderbolt mesh using **MLX JACCL** (RDMA over Thunderbolt) and runs distributed jobs via `mlx.launch --backend jaccl`.
 
+> **Prefer a GUI?** Once you've completed steps 0–2 (hardware, RDMA enablement, conda env
+> — those are inherently manual), the **JacclCluster** macOS app in `app/` covers steps
+> 4–6 and 8: hostfile editing with live RDMA verification, HuggingFace model downloads +
+> node sync, and server start/stop with health monitoring. Open
+> `app/JacclCluster.xcodeproj` in Xcode and run.
+
 ---
 
 ## 0) Hardware topology
@@ -236,6 +242,48 @@ Pass offline env vars via `mlx.launch --env`:
 
 - `HF_HUB_OFFLINE=1`
 - `TRANSFORMERS_OFFLINE=1`
+
+### `[jaccl] Changing queue pair to RTR failed with errno 96`
+
+The RDMA device exists and the link is up, but its port has **no IPv6
+link-local**, so the RDMA GID table is empty and the connection handshake has
+nothing to route with. Usual cause: the port is a member of the **Thunderbolt
+Bridge** (macOS's default), which holds the addresses itself.
+
+Check (on the failing node — an empty GID table apart from GID[0] confirms it):
+
+```bash
+ifconfig bridge0 | grep member         # is your rdma port (e.g. en2) in here?
+ibv_devinfo -v -d rdma_en2 | grep "GID\["
+```
+
+Fix, in System Settings → Network (two steps — deleting the Thunderbolt
+Bridge *service* from the list is NOT enough):
+
+1. ⋯ menu under the service list → **Manage Virtual Interfaces** → delete
+   the **Thunderbolt Bridge** (this is what actually dissolves `bridge0`).
+2. ⋯ → **Add Service** → pick the Thunderbolt port (e.g. "Thunderbolt 3"),
+   so the port gets its own `fe80::` at every boot.
+
+Then re-check the GID table — an `fe80::…` GID entry should appear.
+
+### `[jaccl] Couldn't allocate protection domain`
+
+The hostfile's `rdma` matrix names a device that **doesn't exist on that
+node** (device names differ per machine — e.g. a MacBook may have
+`rdma_en1/2/7` while a Studio has `rdma_en2…7`). Run `ibv_devices` on each
+node and fix the matrix. The connected pair is the port whose interface shows
+`status: active` in `ifconfig` on each side.
+
+### Quick RDMA smoke test (no model needed)
+
+```bash
+mlx.launch --verbose --backend jaccl --hostfile hostfiles/hosts.json -- \
+  python scripts/jaccl_smoke.py
+```
+
+Prints one `[smoke] rank=N … all_sum=[2.0, …]` line per rank when the whole
+RDMA path works.
 
 ### Stop stuck runs (no reboot)
 

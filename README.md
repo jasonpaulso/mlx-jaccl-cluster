@@ -17,8 +17,30 @@ You get:
 
 ---
 
+## macOS app (alternative to the scripts)
+
+`app/` contains **JacclCluster**, a native macOS (14+) SwiftUI app that drives the same
+cluster without a terminal:
+
+- **Cluster** — edit the hostfile (nodes, coordinator IP, RDMA adjacency matrix with
+  live `ibv_devices` cross-checks), verify SSH/RDMA/env per node, and **set up worker
+  nodes** (copies rank 0's repo + python environment to each node at identical paths
+  over rsync — no terminal needed on workers beyond RDMA enablement).
+- **Server** — start/stop the OpenAI-compatible server with live logs and
+  `/health` + `/queue` polling.
+- **Models** — search MLX models on HuggingFace, download them (resumable, checksummed),
+  and rsync them to every node at the same absolute path.
+
+Build: open `app/JacclCluster.xcodeproj` in Xcode and run ("Sign to Run Locally" is fine).
+The app edits the same gitignored `hostfiles/hosts.json` the scripts use, and launches
+the server via the same `mlx.launch` invocation, so the scripts below remain fully
+interchangeable with it. Headless logic tests: `swift test` in `app/JacclClusterKit`.
+
+---
+
 ## Repository layout
 
+- `app/` — JacclCluster macOS app (Xcode project + `JacclClusterKit` Swift package)
 - `docs/from-scratch.md` — full setup instructions (RDMA enablement, conda env, hostfile, troubleshooting)
 - `hostfiles/`
   - `hosts.json.example` — template hostfile (copy to `hosts.json` and edit)

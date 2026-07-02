@@ -126,7 +126,9 @@ echo
 if [[ -n "$HOSTS" ]]; then
   echo "Stopping any existing server processes..."
   for h in $HOSTS; do
-    ssh "$h" 'pkill -f openai_cluster_server.py || true' 2>/dev/null || true
+    # [.] keeps pkill from matching this ssh's own command line when a host
+    # resolves to the local machine.
+    ssh "$h" 'pkill -f "openai_cluster_server[.]py" || true' 2>/dev/null || true
   done
 fi
 

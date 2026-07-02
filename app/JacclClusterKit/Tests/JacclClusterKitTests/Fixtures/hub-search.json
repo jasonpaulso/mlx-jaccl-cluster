@@ -1,0 +1,22 @@
+[
+  {
+    "_id": "abc123",
+    "id": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+    "modelId": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+    "likes": 42,
+    "downloads": 12345,
+    "gated": false,
+    "tags": ["mlx", "safetensors", "qwen3", "4-bit"],
+    "pipeline_tag": "text-generation",
+    "createdAt": "2025-07-01T00:00:00.000Z"
+  },
+  {
+    "_id": "def456",
+    "id": "mlx-community/SomeGated-8bit",
+    "modelId": "mlx-community/SomeGated-8bit",
+    "likes": 7,
+    "downloads": 99,
+    "gated": "manual",
+    "tags": ["mlx", "8-bit"]
+  }
+]

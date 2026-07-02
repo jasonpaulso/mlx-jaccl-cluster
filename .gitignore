@@ -5,6 +5,7 @@ __pycache__/
 *.pyd
 .venv/
 venv/
+/mlxjccl/
 .env
 
 # macOS
@@ -17,3 +18,10 @@ venv/
 hostfiles/*.local.json
 hostfiles/hosts.json
 *.token
+
+# Xcode / SwiftPM (app/)
+xcuserdata/
+*.xcuserstate
+.build/
+DerivedData/
+.swiftpm/
