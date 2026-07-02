@@ -4,6 +4,8 @@ public struct ClusterView: View {
     @Bindable var model: AppModel
     @State private var tab: Tab = .form
     @State private var actionError: String?
+    @State private var isGenerating = false
+    @State private var generationSummary: String?
 
     enum Tab: String, CaseIterable {
         case form = "Form"
@@ -53,6 +55,37 @@ public struct ClusterView: View {
         } message: {
             Text(actionError ?? "")
         }
+        .alert(
+            "Detected cabling",
+            isPresented: Binding(
+                get: { generationSummary != nil },
+                set: { if !$0 { generationSummary = nil } }
+            )
+        ) {
+            Button("OK") { generationSummary = nil }
+        } message: {
+            Text(generationSummary ?? "")
+        }
+    }
+
+    /// Runs scripts/generate_hostfile.py against the editor's hosts (rank
+    /// order preserved) and applies the result as unsaved changes.
+    private func generateFromCabling() {
+        guard let repoURL = model.settings.config.repoURL else { return }
+        let hosts = store.document.hosts.map(\.ssh)
+        isGenerating = true
+        Task {
+            defer { isGenerating = false }
+            do {
+                let output = try await HostfileGenerator.generate(repoURL: repoURL, hosts: hosts)
+                try store.applySource(output.hostfileJSON)
+                generationSummary = output.links.isEmpty
+                    ? "Matrix updated — review and Save."
+                    : output.links.joined(separator: "\n")
+            } catch {
+                actionError = error.localizedDescription
+            }
+        }
     }
 
     private var toolbar: some View {
@@ -95,6 +128,18 @@ public struct ClusterView: View {
                 .keyboardShortcut("s")
                 .buttonStyle(.borderedProminent)
             }
+
+            Button {
+                generateFromCabling()
+            } label: {
+                if isGenerating {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Label("Generate from cabling", systemImage: "cable.connector")
+                }
+            }
+            .disabled(isGenerating || store.document.hosts.isEmpty || store.fileURL == nil)
+            .help("SSH to every node, detect the Thunderbolt cabling (domain-UUID matching), and fill the rdma matrix and coordinator IP. The result lands in the editor as unsaved changes.")
 
             Button {
                 Task {
