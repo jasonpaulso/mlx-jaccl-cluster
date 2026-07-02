@@ -2,6 +2,12 @@
 
 This guide sets up a 4‑Mac, fully connected Thunderbolt mesh using **MLX JACCL** (RDMA over Thunderbolt) and runs distributed jobs via `mlx.launch --backend jaccl`.
 
+> **Prefer a GUI?** Once you've completed steps 0–2 (hardware, RDMA enablement, conda env
+> — those are inherently manual), the **JacclCluster** macOS app in `app/` covers steps
+> 4–6 and 8: hostfile editing with live RDMA verification, HuggingFace model downloads +
+> node sync, and server start/stop with health monitoring. Open
+> `app/JacclCluster.xcodeproj` in Xcode and run.
+
 ---
 
 ## 0) Hardware topology

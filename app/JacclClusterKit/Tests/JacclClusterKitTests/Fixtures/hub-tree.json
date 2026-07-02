@@ -1,0 +1,37 @@
+[
+  {
+    "type": "file",
+    "oid": "1111111111111111111111111111111111111111",
+    "size": 1519,
+    "path": ".gitattributes"
+  },
+  {
+    "type": "file",
+    "oid": "2222222222222222222222222222222222222222",
+    "size": 1042,
+    "path": "config.json"
+  },
+  {
+    "type": "directory",
+    "oid": "3333333333333333333333333333333333333333",
+    "size": 0,
+    "path": "subdir"
+  },
+  {
+    "type": "file",
+    "oid": "4444444444444444444444444444444444444444",
+    "size": 2264823904,
+    "path": "model.safetensors",
+    "lfs": {
+      "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size": 2264823904,
+      "pointerSize": 135
+    }
+  },
+  {
+    "type": "file",
+    "oid": "5555555555555555555555555555555555555555",
+    "size": 11422778,
+    "path": "tokenizer.json"
+  }
+]
