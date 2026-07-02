@@ -34,12 +34,25 @@ public struct SSHRunner: Sendable {
                 return .failure(.timeout(host: host))
             }
             if result.exitCode != 0 {
-                return .failure(.commandFailed(host: host, detail: Self.humanize(stderr: result.stderr)))
+                return .failure(.commandFailed(host: host, detail: Self.failureDetail(result)))
             }
             return .success(())
         } catch {
             return .failure(.commandFailed(host: host, detail: error.localizedDescription))
         }
+    }
+
+    /// Verbose failure description: humanized hint when the stderr pattern is
+    /// known, otherwise the raw output — always with the ssh exit code, so a
+    /// failure is never reported as just "SSH command failed."
+    public static func failureDetail(_ result: ProcessResult) -> String {
+        let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stdout = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        var detail = humanize(stderr: result.stderr)
+        if stderr.isEmpty && !stdout.isEmpty {
+            detail = String(stdout.suffix(300))
+        }
+        return "\(detail) (ssh exit \(result.exitCode))"
     }
 
     /// Maps common opaque ssh failures to actionable hints.

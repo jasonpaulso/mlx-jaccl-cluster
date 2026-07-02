@@ -66,7 +66,7 @@ public struct VerifyService: Sendable {
                 return result
             }
             guard hostnameRun.exitCode == 0 else {
-                result.failureHint = SSHRunner.humanize(stderr: hostnameRun.stderr)
+                result.failureHint = SSHRunner.failureDetail(hostnameRun)
                 return result
             }
             result.sshOK = true

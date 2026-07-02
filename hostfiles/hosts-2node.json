@@ -1,12 +1,22 @@
 [
   {
-    "ssh": "macstudio1.local",
-    "ips": ["192.168.0.36"],
-    "rdma": [null, "rdma_en5"]
+    "ssh" : "Jasons-MacBook-Pro.local",
+    "ips" : [
+      "192.168.0.36"
+    ],
+    "rdma" : [
+      null,
+      "rdma_en5"
+    ]
   },
   {
-    "ssh": "macstudio2.local",
-    "ips": [],
-    "rdma": ["rdma_en5", null]
+    "ssh" : "jasons-mac-studio.local",
+    "ips" : [
+
+    ],
+    "rdma" : [
+      "rdma_en5",
+      null
+    ]
   }
 ]
