@@ -7,7 +7,8 @@ set -euo pipefail
 # Starts an OpenAI-compatible API server distributed across your MLX cluster.
 #
 # Required:
-#   MODEL_DIR    Path to the MLX model directory (must exist on all nodes)
+#   MODEL_DIR    Path to the MLX model directory (must exist on all nodes).
+#                Optional: omit to start empty and load models via the API.
 #
 # Optional environment variables:
 #   HOSTFILE     Path to cluster hostfile (default: hostfiles/hosts.json)
@@ -30,15 +31,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
 # ---------
-# Required settings
+# Initial model (optional: without it the server starts empty and the first
+# request or POST /v1/models/load picks the model)
 # ---------
-if [[ -z "${MODEL_DIR:-}" ]]; then
-  echo "ERROR: MODEL_DIR is required. Set it to the path of your MLX model."
-  echo "Example: MODEL_DIR=/path/to/model ./run_openai_cluster_server.sh"
-  exit 1
-fi
-
-if [[ ! -d "$MODEL_DIR" ]]; then
+MODEL_DIR="${MODEL_DIR:-}"
+if [[ -n "$MODEL_DIR" && ! -d "$MODEL_DIR" ]]; then
   echo "ERROR: MODEL_DIR does not exist: $MODEL_DIR"
   exit 1
 fi
@@ -51,13 +48,19 @@ HOSTFILE="${HOSTFILE:-$REPO_DIR/hostfiles/hosts.json}"
 SERVER_PY="${SERVER_PY:-$REPO_DIR/server/openai_cluster_server.py}"
 
 # Default MODEL_ID to the basename of MODEL_DIR
-MODEL_ID="${MODEL_ID:-$(basename "$MODEL_DIR")}"
+if [[ -n "$MODEL_DIR" ]]; then
+  MODEL_ID="${MODEL_ID:-$(basename "$MODEL_DIR")}"
+else
+  MODEL_ID="${MODEL_ID:-}"
+fi
 
 HTTP_HOST="${HTTP_HOST:-0.0.0.0}"
 HTTP_PORT="${HTTP_PORT:-8080}"
 CTRL_PORT="${CTRL_PORT:-18080}"
 QUEUE_MAX="${QUEUE_MAX:-8}"
 REQ_TIMEOUT="${REQ_TIMEOUT:-120}"
+MODELS_DIR="${MODELS_DIR:-$HOME/models_mlx}"
+LOAD_TIMEOUT="${LOAD_TIMEOUT:-600}"
 
 # ---------
 # Validate paths
@@ -111,7 +114,7 @@ print(' '.join(h['ssh'] for h in hosts))
 # Print configuration
 # ---------
 echo "=== MLX-JACCL Cluster Server ==="
-echo "Model:      $MODEL_DIR"
+echo "Model:      ${MODEL_DIR:-(none — load via API)}"
 echo "Model ID:   $MODEL_ID"
 echo "Hostfile:   $HOSTFILE"
 echo "Hosts:      $HOSTS"
@@ -160,5 +163,7 @@ echo "Starting cluster server..."
   --env CTRL_HOST="$CTRL_HOST" \
   --env CTRL_PORT="$CTRL_PORT" \
   --env QUEUE_MAX="$QUEUE_MAX" \
-  --env REQ_TIMEOUT="$REQ_TIMEOUT" -- \
+  --env REQ_TIMEOUT="$REQ_TIMEOUT" \
+  --env MODELS_DIR="$MODELS_DIR" \
+  --env LOAD_TIMEOUT="$LOAD_TIMEOUT" -- \
   "$SERVER_PY"

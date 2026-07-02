@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import gc
 import time
 import json
 import socket
@@ -7,6 +8,7 @@ import struct
 import threading
 import asyncio
 import concurrent.futures
+import importlib.util
 import uuid
 from typing import Optional, Union, AsyncGenerator
 
@@ -100,10 +102,71 @@ def sharded_load_with_fallback(repo):
 
 
 # -------------------------
+# Model library scanning
+# -------------------------
+def _model_complete(d: Path) -> bool:
+    """A model dir is usable when config.json exists and, if an index is
+    present, every weight file it references is on disk (catches partial
+    rsyncs — HF_HUB_OFFLINE means nothing gets repaired at load time)."""
+    if not (d / "config.json").is_file():
+        return False
+    weights = {w.name for w in d.glob("*.safetensors")}
+    if not weights:
+        return False
+    index = d / "model.safetensors.index.json"
+    if index.is_file():
+        try:
+            needed = set(json.loads(index.read_text()).get("weight_map", {}).values())
+        except Exception:
+            return False
+        if not needed <= weights:
+            return False
+    return True
+
+
+def scan_local_models() -> dict[str, str]:
+    """id -> absolute dir for complete model dirs under MODELS_DIR, plus the
+    currently loaded model (which may live elsewhere)."""
+    found: dict[str, str] = {}
+    root = Path(MODELS_DIR)
+    if root.is_dir():
+        for d in sorted(root.iterdir()):
+            if d.is_dir() and _model_complete(d):
+                found[d.name] = str(d)
+    if MODEL_ID and MODEL_ID not in found and Path(MODEL_DIR).is_dir():
+        found[MODEL_ID] = MODEL_DIR
+    return found
+
+
+def _shard_compatible(model_dir: str) -> bool:
+    """Same rule as the app's launch preflight: the config's model_type must
+    map to an mlx_lm.models module whose source defines shard()."""
+    try:
+        cfg = json.loads((Path(model_dir) / "config.json").read_text())
+        model_type = cfg.get("model_type")
+        if not model_type:
+            return False
+        spec = importlib.util.find_spec(f"mlx_lm.models.{model_type}")
+        if spec is None or not spec.origin:
+            return False
+        return "def shard" in Path(spec.origin).read_text()
+    except Exception:
+        return False
+
+
+# -------------------------
 # Configuration (env vars)
 # -------------------------
-MODEL_DIR = os.environ["MODEL_DIR"]  # REQUIRED
-MODEL_ID = os.environ.get("MODEL_ID", os.path.basename(MODEL_DIR.rstrip("/")))
+# Initial model. Optional: without it the server starts empty and the first
+# request (or POST /v1/models/load) picks the model.
+MODEL_DIR = os.environ.get("MODEL_DIR") or ""
+MODEL_ID = os.environ.get("MODEL_ID") or (
+    os.path.basename(MODEL_DIR.rstrip("/")) if MODEL_DIR else None)
+
+# Library of switchable models: immediate subdirectories of MODELS_DIR that
+# are complete on EVERY rank and whose architecture mlx-lm can shard.
+MODELS_DIR = os.path.expanduser(os.environ.get("MODELS_DIR", "~/models_mlx"))
+LOAD_TIMEOUT = float(os.environ.get("LOAD_TIMEOUT", "600"))  # model (un)load budget
 
 HOST = os.environ.get("HOST", "0.0.0.0")      # HTTP bind on rank0
 PORT = int(os.environ.get("PORT", "8080"))    # HTTP port on rank0
@@ -132,6 +195,14 @@ app = FastAPI()
 _model = None
 _tok = None
 _world = None
+
+# Model registry (rank0): id -> dir for models loadable on every rank.
+_available_models: dict[str, str] = {}
+_available_at: float = 0.0
+_loading: Optional[str] = None  # model id mid-switch, for /health
+# Set when ranks may disagree about the loaded model (a rank went silent
+# during a switch). Generation would deadlock; only a restart recovers.
+_degraded = False
 
 _queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_MAX)  # rank0 only uses it
 
@@ -268,6 +339,50 @@ def rank0_wait_done(expected_world_size: int) -> None:
             if msg and msg.get("type") == "done":
                 done.add(r)
 
+def rank0_collect(expected_world_size: int, timeout_s: float) -> dict[int, dict]:
+    """
+    Collect one {"type":"done"|"error"} reply per worker, or give up at the
+    deadline (a missing entry means that rank never answered). All control
+    socket reads happen on the single gen thread, so replies can't be stolen
+    by a concurrent reader.
+    """
+    deadline = time.time() + timeout_s
+    replies: dict[int, dict] = {}
+    while len(replies) < (expected_world_size - 1) and time.time() < deadline:
+        with _worker_lock:
+            items = list(_worker_socks.items())
+        for r, s in items:
+            if r in replies:
+                continue
+            s.settimeout(0.2)
+            try:
+                msg = recv_msg(s)
+            except Exception:
+                msg = None
+            if msg and msg.get("type") in ("done", "error"):
+                replies[r] = msg
+    return replies
+
+# -------------------------
+# Lockstep model loading
+# -------------------------
+def _load_model_local(model_dir: Optional[str], model_id: Optional[str]) -> None:
+    """
+    Drop the current model and load another (or just unload, when model_dir
+    is None). Every rank must run this at the same time — sharded_load ends
+    in a collective, so a rank that skips it (or fails before reaching it)
+    strands the others. Unloading alone runs no collectives.
+    """
+    global _model, _tok, MODEL_DIR, MODEL_ID
+    _model = None
+    _tok = None
+    gc.collect()
+    mx.clear_cache()
+    if model_dir:
+        _model, _tok = sharded_load_with_fallback(model_dir)
+    MODEL_DIR = model_dir or ""
+    MODEL_ID = model_id
+
 # -------------------------
 # Worker loop
 # -------------------------
@@ -285,15 +400,138 @@ def worker_loop(rank: int) -> None:
         msg = recv_msg(s)
         if not msg:
             continue
-        if msg.get("type") != "task":
-            continue
+        kind = msg.get("type")
 
-        prompt = msg["prompt"]
-        max_tokens = int(msg["max_tokens"])
+        if kind == "task":
+            prompt = msg["prompt"]
+            max_tokens = int(msg["max_tokens"])
+            _ = generate(_model, _tok, prompt, max_tokens=max_tokens)
+            mx.eval()
+            send_msg(s, {"type": "done", "rank": rank})
 
-        _ = generate(_model, _tok, prompt, max_tokens=max_tokens)
-        mx.eval()
-        send_msg(s, {"type": "done", "rank": rank})
+        elif kind == "scan":
+            send_msg(s, {"type": "done", "rank": rank,
+                         "models": sorted(scan_local_models())})
+
+        elif kind == "load":
+            try:
+                _load_model_local(msg["model_dir"], msg["model_id"])
+                send_msg(s, {"type": "done", "rank": rank})
+            except Exception as e:
+                print(f"[worker {rank}] load failed: {e}", flush=True)
+                send_msg(s, {"type": "error", "rank": rank,
+                             "detail": f"{type(e).__name__}: {e}"})
+
+# -------------------------
+# Model registry + switching (rank0, gen thread only)
+# -------------------------
+def _refresh_available_blocking() -> dict[str, str]:
+    """
+    Recompute the switchable-model registry: rank0's scan intersected with
+    every worker's, then filtered to architectures mlx-lm can shard. Runs on
+    the gen thread (it reads the control sockets). If a worker doesn't answer
+    the scan, the previous registry is kept — stale beats wrong.
+    """
+    global _available_models, _available_at
+    local = scan_local_models()
+
+    with _worker_lock:
+        items = list(_worker_socks.items())
+    for r, s in items:
+        send_msg(s, {"type": "scan"})
+    replies = rank0_collect(_world.size(), timeout_s=15)
+    if len(replies) < (_world.size() - 1):
+        print("[rank0] model scan: not all workers replied; keeping previous registry", flush=True)
+        return _available_models
+
+    common = set(local)
+    for msg in replies.values():
+        common &= set(msg.get("models", []))
+    available = {
+        mid: local[mid] for mid in sorted(common) if _shard_compatible(local[mid])
+    }
+    if MODEL_ID:
+        available.setdefault(MODEL_ID, MODEL_DIR)  # what's loaded is servable by definition
+    _available_models = available
+    _available_at = time.time()
+    return available
+
+
+def _switch_model_blocking(model_id: str) -> None:
+    """
+    Runs on the gen thread. Re-verifies availability on all ranks, then loads
+    the model everywhere in lockstep. On a clean partial failure (every rank
+    replied, at least one errored) the previous model is reloaded in lockstep.
+    A rank that never replies leaves ranks disagreeing about the loaded model
+    — that's unrecoverable without a restart, so the cluster is marked
+    degraded rather than pretending.
+    """
+    global _loading, _degraded
+    if _degraded:
+        raise RuntimeError("Cluster is degraded from an earlier failed model load — restart the server.")
+    if model_id == MODEL_ID:
+        return
+    available = _refresh_available_blocking()
+    if model_id not in available:
+        raise RuntimeError(
+            f"Model '{model_id}' is not loadable on every node. Available: {sorted(available)}")
+
+    old_dir, old_id = MODEL_DIR, MODEL_ID
+    new_dir = available[model_id]
+    _loading = model_id
+    print(f"[rank0] switching model {old_id or '(none)'} -> {model_id}", flush=True)
+    try:
+        rank0_broadcast_task_raw({"type": "load", "model_dir": new_dir, "model_id": model_id})
+        local_error: Optional[str] = None
+        try:
+            _load_model_local(new_dir, model_id)
+        except Exception as e:
+            local_error = f"rank 0: {type(e).__name__}: {e}"
+        replies = rank0_collect(_world.size(), LOAD_TIMEOUT)
+
+        missing = (_world.size() - 1) - len(replies)
+        errors = [f"rank {r}: {m.get('detail', '?')}"
+                  for r, m in replies.items() if m.get("type") == "error"]
+        if local_error:
+            errors.insert(0, local_error)
+
+        if missing:
+            _degraded = True
+            raise RuntimeError(
+                f"{missing} worker(s) never finished loading '{model_id}' "
+                f"(errors: {errors or 'none'}); ranks may disagree — restart the server.")
+        if errors:
+            # Everyone replied cleanly, so a lockstep rollback is safe (when
+            # nothing was loaded before, "rollback" is a lockstep unload).
+            print(f"[rank0] load failed ({'; '.join(errors)}); rolling back to {old_id or '(none)'}", flush=True)
+            rank0_broadcast_task_raw({"type": "load", "model_dir": old_dir or None, "model_id": old_id})
+            rollback_error: Optional[str] = None
+            try:
+                _load_model_local(old_dir or None, old_id)
+            except Exception as e:
+                rollback_error = f"rank 0: {type(e).__name__}: {e}"
+            rb = rank0_collect(_world.size(), LOAD_TIMEOUT)
+            rb_bad = ((_world.size() - 1) - len(rb)) or rollback_error or any(
+                m.get("type") == "error" for m in rb.values())
+            if rb_bad:
+                _degraded = True
+                raise RuntimeError(
+                    f"Loading '{model_id}' failed AND rollback to '{old_id}' failed — "
+                    f"restart the server. Original errors: {'; '.join(errors)}")
+            raise RuntimeError(
+                f"Loading '{model_id}' failed: {'; '.join(errors)}. Rolled back to '{old_id}'.")
+        print(f"[rank0] now serving {MODEL_ID}", flush=True)
+    finally:
+        _loading = None
+
+
+def rank0_broadcast_task_raw(msg: dict) -> None:
+    """Send a non-generate control message (scan/load) to all workers."""
+    with _worker_lock:
+        items = list(_worker_socks.items())
+    for r, s in items:
+        send_msg(s, msg)
+
 
 # -------------------------
 # Queue worker (rank0 only)
@@ -305,6 +543,11 @@ def _stream_request_blocking(loop: asyncio.AbstractEventLoop, kind: str, prompt:
     """
     def put(chunk) -> None:
         loop.call_soon_threadsafe(chunk_queue.put_nowait, chunk)
+
+    # Chat prompts are templated here — after any model switch — so the
+    # template always belongs to the model that will generate.
+    if kind == "chat":
+        prompt = _build_chat_prompt(prompt)
 
     rank0_broadcast_task({"prompt": prompt, "max_tokens": max_t})
 
@@ -391,6 +634,9 @@ def _request_blocking(kind: str, prompt: str, max_t: int) -> dict:
     Runs on _gen_executor. Blocking: broadcasts the task, generates the full
     completion, waits for workers, returns the OpenAI-shaped response.
     """
+    if kind == "chat":  # template with the (possibly just-switched) model's tokenizer
+        prompt = _build_chat_prompt(prompt)
+
     rank0_broadcast_task({"prompt": prompt, "max_tokens": max_t})
 
     t0 = time.time()
@@ -459,8 +705,38 @@ async def _queue_worker() -> None:
             _queue.task_done()
             continue
 
-        kind, prompt, max_t, result_target, is_stream = item  # kind: "chat" | "completions"
+        kind = item["kind"]  # "chat" | "completions" | "load" | "refresh"
+
+        if kind == "refresh":
+            try:
+                await loop.run_in_executor(_gen_executor, _refresh_available_blocking)
+            except Exception as e:
+                print(f"[rank0] model registry refresh failed: {e}", flush=True)
+            _queue.task_done()
+            continue
+
+        if kind == "load":
+            fut: asyncio.Future = item["target"]
+            try:
+                await loop.run_in_executor(_gen_executor, _switch_model_blocking, item["model_id"])
+                if not fut.done():
+                    fut.set_result({"ok": True, "model": MODEL_ID})
+            except Exception as e:
+                if not fut.done():
+                    fut.set_exception(e)
+            _queue.task_done()
+            continue
+
+        prompt = item["prompt"]
+        max_t = item["max_tokens"]
+        result_target = item["target"]
+        is_stream = item["stream"]
         try:
+            # Auto-switch when the request names another available model.
+            wanted = item.get("model_id")
+            if wanted and wanted != MODEL_ID:
+                await loop.run_in_executor(_gen_executor, _switch_model_blocking, wanted)
+
             if is_stream and stream_generate is not None:
                 chunk_queue: asyncio.Queue = result_target
                 await loop.run_in_executor(
@@ -497,17 +773,54 @@ async def _startup() -> None:
 @app.get("/health")
 def health() -> dict:
     return {
-        "ok": True,
+        "ok": not _degraded,
         "world_size": _world.size(),
         "rank": _world.rank(),
         "model": MODEL_ID,
         "queue_max": QUEUE_MAX,
         "queue_size": _queue.qsize(),
+        "loading": _loading,
+        "degraded": _degraded,
     }
 
 @app.get("/v1/models")
-def list_models() -> dict:
-    return {"object": "list", "data": [{"id": MODEL_ID, "object": "model"}]}
+async def list_models() -> dict:
+    # Serve the cached registry immediately; kick a lazy re-scan through the
+    # queue when it's stale (the scan reads control sockets, which belong to
+    # the gen thread).
+    if time.time() - _available_at > 60:
+        try:
+            _queue.put_nowait({"kind": "refresh"})
+        except asyncio.QueueFull:
+            pass
+    models = _available_models or {MODEL_ID: MODEL_DIR}
+    return {
+        "object": "list",
+        "data": [
+            {"id": mid, "object": "model", "owned_by": "jaccl-cluster",
+             "ready": mid == MODEL_ID}
+            for mid in sorted(models)
+        ],
+    }
+
+class LoadModelReq(BaseModel):
+    model: str
+
+@app.post("/v1/models/load")
+async def load_model_endpoint(req: LoadModelReq):
+    """Explicitly switch the served model (all ranks, in lockstep)."""
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+    try:
+        _queue.put_nowait({"kind": "load", "model_id": req.model, "target": fut})
+    except asyncio.QueueFull:
+        raise HTTPException(status_code=429, detail="Server busy (queue full). Try again later.")
+    try:
+        return await asyncio.wait_for(fut, timeout=LOAD_TIMEOUT + 30)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Model load timed out")
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 @app.get("/queue")
 def queue_status() -> dict:
@@ -522,24 +835,44 @@ async def _stream_generator(chunk_queue: asyncio.Queue) -> AsyncGenerator[str, N
         yield chunk
 
 
+def _resolve_requested_model(requested: Optional[str]) -> Optional[str]:
+    """None when the request targets the loaded model; otherwise the model id
+    to switch to (validated against the registry) or an HTTP 400/409."""
+    wanted = (requested or "").strip()
+    if not wanted or wanted == MODEL_ID:
+        if _model is None:
+            raise HTTPException(
+                status_code=409,
+                detail="No model loaded. Name one in the request's \"model\" field or "
+                       f"POST /v1/models/load. Available: {sorted(_available_models)}")
+        return None
+    if wanted not in _available_models:
+        available = sorted(_available_models) or ([MODEL_ID] if MODEL_ID else [])
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown model '{wanted}'. Available: {available}")
+    return wanted
+
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionsReq):
     if req.stream and stream_generate is None:
         raise HTTPException(status_code=400, detail="stream=true not supported (stream_generate not available)")
-    if req.model and req.model != MODEL_ID:
-        raise HTTPException(status_code=400, detail=f"Only model '{MODEL_ID}' is served")
+    switch_to = _resolve_requested_model(req.model)
 
     if _world.rank() != 0:
         raise HTTPException(status_code=500, detail="Rank != 0 received HTTP request")
 
-    prompt = _build_chat_prompt(req.messages)
+    # Deliberately NOT templated here: the chat template must come from the
+    # tokenizer that generates, which a model switch may be about to replace.
+    prompt = req.messages
     max_t = req.max_tokens or DEFAULT_MAX_TOKENS
 
     if req.stream:
         # Streaming mode: return SSE response
         chunk_queue: asyncio.Queue = asyncio.Queue()
         try:
-            _queue.put_nowait(("chat", prompt, max_t, chunk_queue, True))
+            _queue.put_nowait({"kind": "chat", "prompt": prompt, "max_tokens": max_t,
+                               "target": chunk_queue, "stream": True, "model_id": switch_to})
         except asyncio.QueueFull:
             raise HTTPException(status_code=429, detail="Server busy (queue full). Try again later.")
 
@@ -558,12 +891,15 @@ async def chat_completions(req: ChatCompletionsReq):
         fut: asyncio.Future = loop.create_future()
 
         try:
-            _queue.put_nowait(("chat", prompt, max_t, fut, False))
+            _queue.put_nowait({"kind": "chat", "prompt": prompt, "max_tokens": max_t,
+                               "target": fut, "stream": False, "model_id": switch_to})
         except asyncio.QueueFull:
             raise HTTPException(status_code=429, detail="Server busy (queue full). Try again later.")
 
+        # A model switch can dwarf the normal request budget.
+        timeout = REQ_TIMEOUT + (LOAD_TIMEOUT if switch_to else 0)
         try:
-            return await asyncio.wait_for(fut, timeout=REQ_TIMEOUT)
+            return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
             raise HTTPException(status_code=504, detail="Request timed out")
 
@@ -571,8 +907,7 @@ async def chat_completions(req: ChatCompletionsReq):
 async def completions(req: CompletionsReq):
     if req.stream and stream_generate is None:
         raise HTTPException(status_code=400, detail="stream=true not supported (stream_generate not available)")
-    if req.model and req.model != MODEL_ID:
-        raise HTTPException(status_code=400, detail=f"Only model '{MODEL_ID}' is served")
+    switch_to = _resolve_requested_model(req.model)
 
     if _world.rank() != 0:
         raise HTTPException(status_code=500, detail="Rank != 0 received HTTP request")
@@ -591,7 +926,8 @@ async def completions(req: CompletionsReq):
         # Streaming mode: return SSE response
         chunk_queue: asyncio.Queue = asyncio.Queue()
         try:
-            _queue.put_nowait(("completions", prompt, max_t, chunk_queue, True))
+            _queue.put_nowait({"kind": "completions", "prompt": prompt, "max_tokens": max_t,
+                               "target": chunk_queue, "stream": True, "model_id": switch_to})
         except asyncio.QueueFull:
             raise HTTPException(status_code=429, detail="Server busy (queue full). Try again later.")
 
@@ -610,12 +946,14 @@ async def completions(req: CompletionsReq):
         fut: asyncio.Future = loop.create_future()
 
         try:
-            _queue.put_nowait(("completions", prompt, max_t, fut, False))
+            _queue.put_nowait({"kind": "completions", "prompt": prompt, "max_tokens": max_t,
+                               "target": fut, "stream": False, "model_id": switch_to})
         except asyncio.QueueFull:
             raise HTTPException(status_code=429, detail="Server busy (queue full). Try again later.")
 
+        timeout = REQ_TIMEOUT + (LOAD_TIMEOUT if switch_to else 0)
         try:
-            return await asyncio.wait_for(fut, timeout=REQ_TIMEOUT)
+            return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
             raise HTTPException(status_code=504, detail="Request timed out")
 
@@ -625,7 +963,10 @@ async def completions(req: CompletionsReq):
 def main() -> None:
     global _model, _tok, _world
     _world = mx.distributed.init()
-    _model, _tok = sharded_load_with_fallback(MODEL_DIR)
+    if MODEL_DIR:
+        _model, _tok = sharded_load_with_fallback(MODEL_DIR)
+    else:
+        print(f"[rank {_world.rank()}] starting without a model — load one via the API", flush=True)
 
     if _world.rank() == 0:
         th = threading.Thread(target=rank0_accept_workers, args=(_world.size(),), daemon=True)
@@ -633,6 +974,11 @@ def main() -> None:
 
         if not rank0_wait_for_workers(_world.size(), timeout_s=60):
             raise RuntimeError("Workers did not connect to control-plane in time")
+
+        # Build the model registry before serving (the gen thread owns the
+        # control sockets afterwards; here nothing else is reading them).
+        available = _refresh_available_blocking()
+        print(f"[rank0] switchable models: {sorted(available)}", flush=True)
 
         uvicorn.run(app, host=HOST, port=PORT, log_level="info")
     else:
